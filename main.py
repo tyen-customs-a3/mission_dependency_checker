@@ -44,6 +44,18 @@ def save_report(mission_reports, output_dir="reports", include_found=False):
         
     print(f"\nReport saved to: {output_file}")
 
+def print_quick_summary(mission_reports):
+    """Print a quick summary of missing classes across all missions"""
+    print("\nQUICK SUMMARY")
+    print("=============")
+    
+    # Count total missing classes per mission
+    for scanner in mission_reports:
+        if scanner.missing_classes:
+            print(f"{scanner.mission_name}: {len(scanner.missing_classes)} missing classes")
+            for class_name in sorted(scanner.missing_classes):
+                print(f"  - {class_name}")
+
 def main():
     # Scan mods folder first to build class database
     mods_folder = r"C:\pca_extracted"
@@ -58,6 +70,9 @@ def main():
     
     print(f"\nScanning mission folder: {mission_folder}")
     mission_reports = scan_mission_folder(mission_folder, class_database)
+    
+    # Print quick summary before detailed report
+    print_quick_summary(mission_reports)
     
     print("\nMISSION ANALYSIS REPORT")
     print("=====================")
