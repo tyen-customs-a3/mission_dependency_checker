@@ -74,9 +74,6 @@ def main():
     # Print quick summary before detailed report
     print_quick_summary(mission_reports)
     
-    print("\nMISSION ANALYSIS REPORT")
-    print("=====================")
-    
     # Save report to disk - set include_found=True if you want to include found classes
     save_report(mission_reports, include_found=False)
 
