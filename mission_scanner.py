@@ -1,19 +1,28 @@
 import re
 import os
-from typing import Set, Dict
-from database import ClassEntry
+from typing import Set, Dict, Tuple
+from database import ClassEntry, AssetEntry
 
 class MissionDependencyScanner:
-    def __init__(self, class_database: Dict[str, Set[ClassEntry]], mission_name: str):
+    def __init__(self, class_database: Dict[str, Set[ClassEntry]], 
+                 asset_database: Dict[str, Set[AssetEntry]], 
+                 mission_name: str):
         self.class_database = class_database
+        self.asset_database = asset_database
         self.mission_name = mission_name
         # Flatten database for easier searching
         self.all_classes = {
             entry.name for entries in class_database.values() 
             for entry in entries
         }
+        self.all_assets = {
+            self._normalize_path(entry.path) for entries in asset_database.values() 
+            for entry in entries
+        }
         self.missing_classes = set()
         self.found_classes = set()
+        self.missing_assets = set()
+        self.found_assets = set()
         
         # Add default/engine classes that always exist
         self.default_classes = {
@@ -203,35 +212,89 @@ class MissionDependencyScanner:
         
         return class_names
 
-    def scan_file(self, file_path: str) -> Set[str]:
-        """Scan a single mission file for class dependencies"""
+    def _normalize_path(self, path: str) -> str:
+        """Normalize asset path for consistent comparison"""
+        # Remove leading a3/ and z/ if present since extracted paths don't have them
+        path = re.sub(r'^/?(?:a3/|z/)', '', path.lower())
+        # Remove leading slash if present 
+        path = re.sub(r'^/', '', path)
+        # Normalize slashes
+        return path.replace('\\', '/').replace('//', '/')
+
+    def _path_matches(self, search_path: str, database_paths: Set[str]) -> bool:
+        """Check if path matches any database path, including suffix matches"""
+        norm_search = self._normalize_path(search_path)
+        # Try exact match first
+        if norm_search in database_paths:
+            return True
+        # Try suffix match
+        return any(db_path.endswith(norm_search) for db_path in database_paths)
+
+    def extract_asset_paths(self, content: str) -> Set[str]:
+        """Extract asset paths from content"""
+        asset_paths = set()
+        
+        # Common asset path patterns - now handling paths with or without a3/ prefix
+        patterns = [
+            r'[/\\][a-z0-9_/\\]+\.p3d\b',  # 3D models 
+            r'[/\\][a-z0-9_/\\]+\.paa\b',  # Textures
+            r'[/\\][a-z0-9_/\\]+\.wss\b',  # Sounds
+            r'[/\\][a-z0-9_/\\]+\.ogg\b',  # Sounds
+            r'[/\\][a-z0-9_/\\]+\.wav\b',  # Sounds
+            r'[/\\][a-z0-9_/\\]+\.jpg\b',  # Images
+            r'[/\\][a-z0-9_/\\]+\.png\b'   # Images
+        ]
+        
+        # Remove comments first
+        content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
+        content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+        
+        # Extract paths using patterns
+        for pattern in patterns:
+            matches = re.finditer(pattern, content, re.IGNORECASE)
+            for match in matches:
+                path = match.group(0)
+                # Normalize path
+                path = self._normalize_path(path)
+                asset_paths.add(path)
+        
+        return asset_paths
+
+    def scan_file(self, file_path: str) -> Tuple[Set[str], Set[str]]:
+        """Scan a single mission file for dependencies and assets"""
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # Determine if this is a loadout file
-            is_loadout = self.is_loadout_file(file_path)
+            # Get class dependencies
+            class_names = self.extract_sqf_class_names(content) if file_path.lower().endswith('.sqf') \
+                        else self.extract_class_names(content, self.is_loadout_file(file_path))
             
-            # Use different parsers based on file extension
-            if file_path.lower().endswith('.sqf'):
-                class_names = self.extract_sqf_class_names(content)
-            else:
-                class_names = self.extract_class_names(content, is_loadout)
+            # Get asset dependencies
+            asset_paths = self.extract_asset_paths(content)
             
             # Check each class against database
             for class_name in class_names:
                 if class_name in self.all_classes:
                     self.found_classes.add(class_name)
-                elif not (is_loadout and class_name in self.role_classes):
+                elif not (self.is_loadout_file(file_path) and class_name in self.role_classes):
                     # Don't report missing classes for role definitions in loadout files
                     if not class_name.lower() in {'true', 'false', 'nil', 'null', 'obj', 'player', 'this'}:
                         self.missing_classes.add(class_name)
             
-            return class_names
+            # Check assets against database
+            for asset_path in asset_paths:
+                normalized_path = self._normalize_path(asset_path)
+                if self._path_matches(normalized_path, self.all_assets):
+                    self.found_assets.add(normalized_path)
+                else:
+                    self.missing_assets.add(normalized_path)
+            
+            return class_names, asset_paths
 
         except Exception as e:
             print(f"Error scanning {file_path}: {str(e)}")
-            return set()
+            return set(), set()
 
     def print_report(self):
         """Print scanning results"""
@@ -249,6 +312,10 @@ class MissionDependencyScanner:
         print(f"\nMissing Classes: {len(self.missing_classes)}")
         for class_name in sorted(self.missing_classes):
             print(f"  {class_name}")
+        
+        print(f"\nMissing Assets: {len(self.missing_assets)}")
+        for asset_path in sorted(self.missing_assets):
+            print(f"  {asset_path}")
         print("\n" + "-" * 60)
 
 def extract_mission_name(path: str) -> str:
@@ -258,7 +325,7 @@ def extract_mission_name(path: str) -> str:
     mission_name = base.split('.')[0]
     return mission_name
 
-def scan_mission_folder(missions_root: str, class_database: Dict[str, Set[ClassEntry]]):
+def scan_mission_folder(missions_root: str, class_database: Dict[str, Set[ClassEntry]], asset_database: Dict[str, Set[AssetEntry]]):
     """Scan multiple missions in the missions folder"""
     reports = []
     
@@ -272,7 +339,7 @@ def scan_mission_folder(missions_root: str, class_database: Dict[str, Set[ClassE
         mission_path = os.path.join(missions_root, mission_folder)
         mission_name = extract_mission_name(mission_folder)
         
-        scanner = MissionDependencyScanner(class_database, mission_name)
+        scanner = MissionDependencyScanner(class_database, asset_database, mission_name)
         
         # Scan all .hpp, .cpp and .sqf files in the mission folder
         for root, _, files in os.walk(mission_path):

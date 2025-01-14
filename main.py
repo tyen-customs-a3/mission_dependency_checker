@@ -23,7 +23,8 @@ def save_report(mission_reports, output_dir="reports", include_found=False):
     for scanner in mission_reports:
         mission_data = {
             "name": scanner.mission_name,
-            "missing_classes": sorted(list(scanner.missing_classes))
+            "missing_classes": sorted(list(scanner.missing_classes)),
+            "missing_assets": sorted(list(scanner.missing_assets))
         }
         
         # Only include found classes if flag is set
@@ -36,6 +37,7 @@ def save_report(mission_reports, output_dir="reports", include_found=False):
                             mission_data["found_classes"][mod] = []
                         mission_data["found_classes"][mod].append(class_name)
                         break
+            mission_data["found_assets"] = sorted(list(scanner.found_assets))
                     
         report_data["missions"].append(mission_data)
     
@@ -51,10 +53,16 @@ def print_quick_summary(mission_reports):
     
     # Count total missing classes per mission
     for scanner in mission_reports:
-        if scanner.missing_classes:
-            print(f"{scanner.mission_name}: {len(scanner.missing_classes)} missing classes")
-            for class_name in sorted(scanner.missing_classes):
-                print(f"  - {class_name}")
+        if scanner.missing_classes or scanner.missing_assets:
+            print(f"\n{scanner.mission_name}:")
+            if scanner.missing_classes:
+                print(f"  Missing Classes: {len(scanner.missing_classes)}")
+                for class_name in sorted(scanner.missing_classes):
+                    print(f"    - {class_name}")
+            if scanner.missing_assets:
+                print(f"  Missing Assets: {len(scanner.missing_assets)}")
+                for asset_path in sorted(scanner.missing_assets):
+                    print(f"    - {asset_path}")
 
 def main():
     # Scan mods folder first to build class database
@@ -66,15 +74,15 @@ def main():
         return
 
     print(f"\nScanning mods folder: {mods_folder}")
-    class_database = scan_folder(mods_folder)
+    class_database, asset_database = scan_folder(mods_folder)  # Now unpacks both databases
     
     print(f"\nScanning mission folder: {mission_folder}")
-    mission_reports = scan_mission_folder(mission_folder, class_database)
+    mission_reports = scan_mission_folder(mission_folder, class_database, asset_database)
     
     # Print quick summary before detailed report
     print_quick_summary(mission_reports)
     
-    # Save report to disk - set include_found=True if you want to include found classes
+    # Save report to disk
     save_report(mission_reports, include_found=False)
 
 if __name__ == "__main__":

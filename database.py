@@ -19,6 +19,19 @@ class ClassEntry:
     def __hash__(self):
         return hash(self.name)
 
+class AssetEntry:
+    def __init__(self, path: str, file_path: str = ""):
+        self.path = path
+        self.file_path = file_path
+
+    def __eq__(self, other):
+        if not isinstance(other, AssetEntry):
+            return False
+        return self.path == other.path
+
+    def __hash__(self):
+        return hash(self.path)
+
 def parse_class_definitions(file_path: str) -> Set[ClassEntry]:
     """Parse class definitions from a file and return a set of ClassEntry objects."""
     classes = set()
@@ -53,35 +66,36 @@ def get_top_level_folder(file_path: str) -> str:
 class ThreadSafeDict:
     def __init__(self):
         self._dict = {}  # Changed from defaultdict to regular dict
+        self._asset_dict = {}  # New dictionary for assets
         self._lock = Lock()
     
-    def update(self, group: str, classes: Set[ClassEntry]):
+    def update(self, group: str, classes: Set[ClassEntry], assets: Set[AssetEntry] = None):
         with self._lock:
             if group not in self._dict:
                 self._dict[group] = set()
-            # Create a new set with copies of ClassEntry objects
-            new_entries = {
-                ClassEntry(
-                    entry.name,
-                    entry.parent,
-                    entry.file_path
-                ) for entry in classes
-            }
+            if assets and group not in self._asset_dict:
+                self._asset_dict[group] = set()
+            
+            new_entries = {ClassEntry(entry.name, entry.parent, entry.file_path) for entry in classes}
             self._dict[group].update(new_entries)
+            
+            if assets:
+                new_assets = {AssetEntry(asset.path, asset.file_path) for asset in assets}
+                self._asset_dict[group].update(new_assets)
     
-    def get_data(self) -> Dict[str, Set[ClassEntry]]:
+    def get_data(self) -> tuple[Dict[str, Set[ClassEntry]], Dict[str, Set[AssetEntry]]]:
         with self._lock:
-            # Create a deep copy of the data structure
-            return {
-                group: {
-                    ClassEntry(
-                        entry.name,
-                        entry.parent,
-                        entry.file_path
-                    ) for entry in entries
-                }
+            class_data = {
+                group: {ClassEntry(entry.name, entry.parent, entry.file_path) 
+                       for entry in entries}
                 for group, entries in self._dict.items()
             }
+            asset_data = {
+                group: {AssetEntry(asset.path, asset.file_path) 
+                       for asset in entries}
+                for group, entries in self._asset_dict.items()
+            }
+            return class_data, asset_data
 
 def process_file(file_path: str) -> tuple[str, Set[ClassEntry]]:
     """Process a single file and return (group, classes)"""
@@ -89,16 +103,29 @@ def process_file(file_path: str) -> tuple[str, Set[ClassEntry]]:
     classes = parse_class_definitions(file_path)
     return group, classes
 
-def scan_folder(root_dir: str, max_workers: int = 8) -> Dict[str, Set[ClassEntry]]:
-    """Scan folder for .cpp and .hpp files using multiple threads"""
+def scan_folder(root_dir: str, max_workers: int = 8) -> tuple[Dict[str, Set[ClassEntry]], Dict[str, Set[AssetEntry]]]:
+    """Scan folder for files and assets"""
     class_database = ThreadSafeDict()
     files_to_process = []
     
+    def normalize_path(path: str) -> str:
+        """Normalize asset path relative to root directory"""
+        rel_path = os.path.relpath(path, root_dir)
+        # Remove z/ prefix if present
+        rel_path = re.sub(r'^/?(?:a3/|z/)', '', rel_path)
+        return rel_path.lower().replace('\\', '/')
+
     # Collect all files first
     for root, _, files in os.walk(root_dir):
         for file in files:
             if file.endswith(('.cpp', '.hpp')):
                 files_to_process.append(os.path.join(root, file))
+            elif file.lower().endswith(('.paa', '.wss', '.ogg', '.wav', '.p3d', '.jpg', '.png')):
+                # Add asset files directly
+                full_path = os.path.join(root, file)
+                normalized_path = normalize_path(full_path)
+                group = get_top_level_folder(full_path)
+                class_database.update(group, set(), {AssetEntry(normalized_path, full_path)})
 
     # Process files in parallel
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
