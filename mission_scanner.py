@@ -535,8 +535,19 @@ class MissionDependencyScanner:
                 elif not (self.is_loadout_file(file_path) and class_name in self.role_classes):
                     # Don't report missing classes for role definitions in loadout files
                     if not class_name.lower() in {'true', 'false', 'nil', 'null', 'obj', 'player', 'this'}:
+
+                        # Create array of special case class names to ignore
+                        ignore_classes = {
+                            'baseMan',
+                            'marksman', 'ar', 'officer', 'rm_mat', 'medic', 'rm_lt', 'gren', 'rm', 'rm_lat', 'engineer', 'ab',
+                            'OPFOR_LOADOUT', 'ammo'
+                        }
+
+                        if class_name in ignore_classes:
+                            continue
+
                         self.missing_classes.add(class_name)
-                        print(f"Class: {class_name}")
+                        print(f"Class missing: {class_name}")
             
             # Check assets against database with better logging
             for asset_path in asset_paths:

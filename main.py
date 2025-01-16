@@ -113,6 +113,10 @@ def main():
                         class_database[entry.source] = set()
                     class_database[entry.source].add(entry)
 
+        # Sort the class database alphabetically
+        for source, entries in class_database.items():
+            class_database[source] = sorted(entries, key=lambda x: x.name)
+
         # Print database summary
         logger.info("\nClass Database Summary:")
         for source, entries in class_database.items():

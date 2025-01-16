@@ -281,98 +281,82 @@ def write_debug_csv(data: List[dict], source_file: str, category: str):
 def extract_classes_from_cpp(file_path: str) -> Dict[str, List[dict]]:
     """Extract CSV config data from .cpp file, organized by category"""
     config_data = {}
-    current_category = None
-    batch_count = None
     
     with open(file_path, 'r', encoding='utf-8') as f:
         content = f.read()
         lines = content.splitlines()
         
+        current_class = None
         inside_data = False
-        reading_value = False
-        value_buffer = ""
-
+        
         for line in lines:
             line = line.strip()
             
-            # Check for metadata
-            if '_count' in line.lower():
-                category_match = re.search(r'extractedCsv_(\w+)_count', line)
-                if category_match and 'value=' in line:
-                    current_category = category_match.group(1)
-                    batch_count = int(line.split('=')[1].rstrip(';'))
-                    config_data[current_category] = []
+            # Look for class Items with a name containing "extractedcsv_"
+            if 'class Item' in line:
+                inside_data = True
                 continue
             
-            # Check for data chunks
-            if 'extractedCsv_' in line.lower():
-                category_match = re.search(r'extractedCsv_(\w+)_\d+', line)
-                if category_match:
-                    current_category = category_match.group(1)
-                    if current_category not in config_data:
-                        config_data[current_category] = []
-                    inside_data = True
-                continue
-            
-            if inside_data and 'value=' in line:
-                reading_value = True
-                value_buffer = line[6:].rstrip(';')  # Remove 'value=' and trailing semicolon
-                if line.endswith(';'):
-                    reading_value = False
-                    process_batch_data(value_buffer, current_category, config_data)
-                    value_buffer = ""
+            if inside_data:
+                # Find the category from the name
+                if 'name=' in line:
+                    name_match = re.search(r'name="extractedcsv_(\w+)(?:_\d+)?";', line)
+                    if name_match:
+                        category = name_match.group(1)
+                        if category not in config_data and category != "count":
+                            config_data[category] = []
+                            logger.info(f"Found category: {category}")
+                        current_class = category
+                    continue
+                
+                # Process the actual data value
+                if current_class and 'value=' in line:
+                    if current_class != "count":  # Skip the count entries
+                        # Extract the value part
+                        value_start = line.find('value="') + 7
+                        value_end = line.rfind('";')
+                        if value_start > 6 and value_end > value_start:
+                            data = line[value_start:value_end]
+                            csv_lines = parse_cpp_value(data)
+                            for csv_line in csv_lines:
+                                if parsed := parse_csv_line(csv_line):
+                                    if not parsed['category']:
+                                        parsed['category'] = current_class
+                                    config_data[current_class].append(parsed)
+                    current_class = None
                     inside_data = False
-                continue
-            
-            if reading_value:
-                value_buffer += line
-                if line.endswith(';'):
-                    reading_value = False
-                    value_buffer = value_buffer.rstrip(';')
-                    process_batch_data(value_buffer, current_category, config_data)
-                    value_buffer = ""
-                    inside_data = False
-
+    
+    # Print summary of what was found
+    for category, entries in config_data.items():
+        logger.info(f"Category {category}: {len(entries)} entries")
+        if entries:
+            logger.info(f"Sample entry: {entries[0]}")
+    
     return config_data
-
-def process_batch_data(batch_data: str, category: str, config_data: Dict[str, List[dict]]) -> None:
-    """Process a batch of CSV data"""
-    if not batch_data or not category or category not in config_data:
-        return
-
-    csv_lines = parse_cpp_value(batch_data)
-    for line in csv_lines:
-        if not line.startswith('ClassName'):  # Skip header
-            if parsed := parse_csv_line(line):
-                config_data[category].append(parsed)
 
 def parse_cpp_value(value: str) -> List[str]:
     """Parse the specific cpp value format into individual CSV lines"""
-    value = value.strip('"')
-    if '"}' in value:
-        value = value[:value.index('"}')]
-    
-    # Handle escaped newlines and clean up the lines
+    # Split on \n and clean up the lines
     lines = value.split(r'\n')
     return [
-        line.strip().strip('"').replace('\\"', '"')
+        line.strip().strip('"')
         for line in lines
-        if line.strip() and not line.strip().startswith('""}')
+        if line.strip() and not line.startswith('ClassName')  # Skip header
     ]
 
 def parse_csv_line(line: str) -> Optional[Dict[str, str]]:
     """Parse a CSV line into a dictionary"""
     try:
-        # Handle special case of trailing junk data
-        if '"}' in line:
-            line = line[:line.index('"}')]
-        
-        # Split by quotes and comma, handling escaped quotes
+        # Split by quote-comma-quote, handling escaped quotes
         parts = [p.strip().strip('"').replace('""', '"') 
                 for p in line.split('","')]
         
-        if len(parts) == 4:
-            if all(len(p) > 0 for p in parts[:3]):  # parent can be empty
+        if len(parts) >= 4:  # We need at least 4 parts
+            # Clean up first and last quotes
+            parts[0] = parts[0].lstrip('"')
+            parts[-1] = parts[-1].rstrip('"')
+            
+            if all(parts[i].strip() for i in range(3)):  # First 3 fields required
                 return {
                     'class': parts[0],
                     'source': parts[1],
@@ -382,6 +366,24 @@ def parse_csv_line(line: str) -> Optional[Dict[str, str]]:
     except Exception as e:
         logger.error(f"Failed to parse CSV line: {line} - {str(e)}")
     return None
+
+def process_csv_chunk(chunk_data: str, category: str, config_data: Dict[str, List[dict]]) -> None:
+    """Process a chunk of CSV data"""
+    if not chunk_data or not category or category not in config_data:
+        return
+    
+    # Clean up chunk data
+    chunk_data = chunk_data.strip('"').replace('\\"', '"')
+    lines = [line.strip() for line in chunk_data.split(r'\n') if line.strip()]
+    
+    # Process each line
+    for line in lines:
+        if not line.startswith('ClassName'):  # Skip header
+            if parsed := parse_csv_line(line):
+                if parsed['category'] == category:  # Verify category match
+                    config_data[category].append(parsed)
+                else:
+                    logger.warning(f"Category mismatch in line: {line}")
 
 def parse_class_hierarchy(data: Union[str, List[dict], dict]) -> Dict[str, ClassEntry]:
     """Parse class hierarchy data into ClassEntry objects"""
