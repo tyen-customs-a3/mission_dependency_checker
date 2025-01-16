@@ -39,16 +39,37 @@ def parse_class_definitions(file_path: str) -> Set[ClassEntry]:
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
-            
-        # Simple regex to match class definitions
-        # Matches: class ClassName[: ParentClass] {
-        class_pattern = r'class\s+(\w+)(?:\s*:\s*(\w+))?\s*[{;]'
-        matches = re.finditer(class_pattern, content)
         
-        for match in matches:
-            class_name = match.group(1)
-            parent_class = match.group(2)  # Will be None if no parent class
-            classes.add(ClassEntry(class_name, parent_class, file_path))
+        # Remove comments first
+        content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
+        content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+        
+        def extract_nested_classes(text: str, parent_class: Optional[str] = None) -> Set[ClassEntry]:
+            """Recursively extract nested class definitions"""
+            nested_classes = set()
+            
+            # Match class definition and its entire content block
+            class_pattern = r'class\s+(\w+)(?:\s*:\s*(\w+))?\s*\{([^}]*(?:\{[^}]*\}[^}]*)*)\}'
+            
+            for match in re.finditer(class_pattern, text):
+                class_name = match.group(1)
+                direct_parent = match.group(2)  # Explicit parent from inheritance
+                class_content = match.group(3)
+                
+                # If this class has a parent from inheritance use that, otherwise use the containing class
+                effective_parent = direct_parent if direct_parent else parent_class
+                
+                # Add this class
+                entry = ClassEntry(class_name, effective_parent, file_path)
+                nested_classes.add(entry)
+                
+                # Recursively process nested classes
+                nested_classes.update(extract_nested_classes(class_content, class_name))
+            
+            return nested_classes
+        
+        # Start recursive extraction from root level
+        classes.update(extract_nested_classes(content))
             
     except Exception as e:
         print(f"Error parsing {file_path}: {str(e)}")
@@ -103,48 +124,35 @@ def process_file(file_path: str) -> tuple[str, Set[ClassEntry]]:
     classes = parse_class_definitions(file_path)
     return group, classes
 
-def scan_folder(root_dir: str, max_workers: int = 8) -> tuple[Dict[str, Set[ClassEntry]], Dict[str, Set[AssetEntry]]]:
-    """Scan folder for files and assets"""
-    class_database = ThreadSafeDict()
-    files_to_process = []
-    
-    def normalize_path(path: str) -> str:
-        """Normalize asset path relative to root directory"""
-        rel_path = os.path.relpath(path, root_dir)
-        # Remove z/ prefix if present
-        rel_path = re.sub(r'^/?(?:a3/|z/)', '', rel_path)
-        return rel_path.lower().replace('\\', '/')
-
-    # Collect all files first
-    for root, _, files in os.walk(root_dir):
+def scan_for_assets(folder_path):
+    """Scan a folder for .paa files and return their relative paths"""
+    asset_paths = set()
+    for root, _, files in os.walk(folder_path):
         for file in files:
-            if file.endswith(('.cpp', '.hpp')):
-                files_to_process.append(os.path.join(root, file))
-            elif file.lower().endswith(('.paa', '.wss', '.ogg', '.wav', '.p3d', '.jpg', '.png')):
-                # Add asset files directly
+            if file.lower().endswith('.paa'):
                 full_path = os.path.join(root, file)
-                normalized_path = normalize_path(full_path)
-                group = get_top_level_folder(full_path)
-                class_database.update(group, set(), {AssetEntry(normalized_path, full_path)})
+                rel_path = os.path.relpath(full_path, folder_path).replace('\\', '/')
+                asset_paths.add(rel_path.lower())
+    return asset_paths
 
-    # Process files in parallel
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_file = {
-            executor.submit(process_file, file_path): file_path 
-            for file_path in files_to_process
-        }
-        
-        # Process results as they complete
-        for future in future_to_file:
-            try:
-                group, classes = future.result()
-                class_database.update(group, classes)
-            except Exception as e:
-                file_path = future_to_file[future]
-                print(f"Error processing {file_path}: {str(e)}")
-
-    return class_database.get_data()
+def scan_folder(folder_path):
+    """Scan folder for classes and assets"""
+    class_database = defaultdict(set)
+    asset_database = set()  # Simple set of asset paths
+    
+    # Scan for classes
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith(('.hpp', '.cpp')):
+                file_path = os.path.join(root, file)
+                group = get_top_level_folder(file_path)
+                classes = parse_class_definitions(file_path)
+                class_database[group].update(classes)
+    
+    # Scan for assets
+    asset_database.update(scan_for_assets(folder_path))
+    
+    return dict(class_database), asset_database
 
 def print_database(database: Dict[str, Set[ClassEntry]]):
     """Print the class database in a formatted way."""

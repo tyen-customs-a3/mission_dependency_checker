@@ -1,5 +1,6 @@
 from database import scan_folder
 from mission_scanner import scan_mission_folder
+from cache_manager import CacheManager
 import os
 import json
 from datetime import datetime
@@ -65,8 +66,11 @@ def print_quick_summary(mission_reports):
                     print(f"    - {asset_path}")
 
 def main():
+    # Initialize cache manager
+    cache_mgr = CacheManager()
+    
     # Scan mods folder first to build class database
-    mods_folder = r"C:\pca_extracted"
+    mods_folder = r"C:\pcanext_extracted"
     mission_folder = r"C:\pca_missions"
 
     if not os.path.exists(mods_folder):
@@ -74,10 +78,18 @@ def main():
         return
 
     print(f"\nScanning mods folder: {mods_folder}")
-    class_database, asset_database = scan_folder(mods_folder)  # Now unpacks both databases
+    # Try to get cached results first
+    cached_results = cache_mgr.get_cached_scan(mods_folder)
+    if cached_results:
+        print("Using cached mod scan results")
+        class_database, asset_database = cached_results
+    else:
+        print("Performing full mod scan...")
+        class_database, asset_database = scan_folder(mods_folder)
+        cache_mgr.cache_scan(mods_folder, (class_database, asset_database))
     
     print(f"\nScanning mission folder: {mission_folder}")
-    mission_reports = scan_mission_folder(mission_folder, class_database, asset_database)
+    mission_reports = scan_mission_folder(mission_folder, class_database, asset_database, cache_mgr)
     
     # Print quick summary before detailed report
     print_quick_summary(mission_reports)

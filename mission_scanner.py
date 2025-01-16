@@ -1,24 +1,22 @@
 import re
 import os
 from typing import Set, Dict, Tuple
-from database import ClassEntry, AssetEntry
+from database import ClassEntry, AssetEntry, scan_for_assets
 
 class MissionDependencyScanner:
     def __init__(self, class_database: Dict[str, Set[ClassEntry]], 
-                 asset_database: Dict[str, Set[AssetEntry]], 
+                 asset_database: Set[str], 
                  mission_name: str):
         self.class_database = class_database
-        self.asset_database = asset_database
+        self.asset_database = asset_database.copy()  # Create a copy to add mission-local assets
         self.mission_name = mission_name
         # Flatten database for easier searching
         self.all_classes = {
             entry.name for entries in class_database.values() 
             for entry in entries
         }
-        self.all_assets = {
-            self._normalize_path(entry.path) for entries in asset_database.values() 
-            for entry in entries
-        }
+        # Asset database is already a set of paths
+        self.all_assets = {self._normalize_path(path) for path in asset_database}
         self.missing_classes = set()
         self.found_classes = set()
         self.missing_assets = set()
@@ -60,6 +58,15 @@ class MissionDependencyScanner:
             'defaults',
         }
         
+        # Add prefixes of class names to ignore (stored in lowercase)
+        self.ignore_prefixes = {
+            prefix.lower() for prefix in {
+                'Rcs',   # Resource selection system classes
+                'CBA_',  # CBA mod classes
+                'ctrl',  # UI control classes
+            }
+        }
+        
         # Add common loadout base classes to skip
         self.loadout_base_classes = {
             'baseMan', 'rm', 'crew'
@@ -74,77 +81,220 @@ class MissionDependencyScanner:
             'fac', 'ar_c', 'crew_c', 'r_c', 'rm_lat', 'rm_fa'
         }
 
+        # Add prefixes of variables to ignore in configs
+        self.config_vars = {
+            'GUI_',         # GUI variables like GUI_BCG_RGB_R
+            'IGUI_',       # Interface GUI variables
+            'SafeZone',    # SafeZone variables
+            'pixel',       # pixel sizing variables
+            'safezone'     # lowercase variants
+            'ai'           # AI variables
+        }
+
+        # Add nested class prefixes to ignore
+        self.nested_ignore_prefixes = {
+            'ai',     # AI function categories
+            'pca',    # PCA mod functions
+            'player', # Player related functions
+        }
+        
+        # Scan mission folder for assets and add them to the database
+        mission_assets = scan_for_assets(mission_name)
+        self.asset_database.update(mission_assets)
+
+        # Build inheritance maps
+        self.parent_map = {}  # Direct parent lookup: child -> parent
+        self.inheritance_tree = {}  # Full inheritance chain: class -> set(all ancestors)
+        
+        # Build initial parent map from mod database
+        for entries in class_database.values():
+            for entry in entries:
+                if entry.parent:
+                    self.parent_map[entry.name] = entry.parent
+        
+        # Build complete inheritance tree
+        self._build_inheritance_tree()
+
+    def _build_inheritance_tree(self):
+        """Build complete inheritance tree for all known classes"""
+        self.inheritance_tree.clear()
+        
+        def get_all_parents(class_name: str, visited: set) -> set:
+            """Recursively get all parent classes"""
+            if class_name in visited:  # Prevent infinite recursion
+                return set()
+                
+            visited.add(class_name)
+            all_parents = set()
+            
+            # Get direct parent first
+            parent = self.parent_map.get(class_name)
+            if parent:
+                all_parents.add(parent)
+                # Get all parents of this parent
+                parent_ancestors = get_all_parents(parent, visited)
+                all_parents.update(parent_ancestors)
+                
+            return all_parents
+
+        # Process each class to build its complete inheritance chain
+        for class_name in list(self.parent_map.keys()):
+            if class_name not in self.inheritance_tree:
+                self.inheritance_tree[class_name] = get_all_parents(class_name, set())
+
+    def _get_all_parents(self, class_name: str, visited: set) -> set:
+        """Recursively get all parent classes including indirect ancestors"""
+        if class_name in self.inheritance_tree:
+            return self.inheritance_tree[class_name]
+            
+        if class_name in visited:  # Prevent infinite recursion
+            return set()
+            
+        visited.add(class_name)
+        parents = set()
+        
+        # Add direct parent
+        parent = self.parent_map.get(class_name)
+        if parent:
+            parents.add(parent)
+            # Add parent's ancestors recursively
+            parents.update(self._get_all_parents(parent, visited))
+        
+        self.inheritance_tree[class_name] = parents
+        return parents
+
+    def _update_inheritance(self, new_classes: Dict[str, str]):
+        """Update inheritance info with newly discovered classes"""
+        # Add new parent relationships
+        self.parent_map.update(new_classes)
+        # Rebuild entire inheritance tree to include new relationships
+        self._build_inheritance_tree()
+        
+        # Also update the all_classes set with new valid classes
+        self.all_classes.update(
+            name for name, parent in new_classes.items() 
+            if not self._should_ignore_class(name)
+        )
+
     def is_loadout_file(self, file_path: str) -> bool:
         """Check if file is a loadout configuration"""
         return 'loadout' in file_path.lower() and file_path.endswith(('.hpp', '.cpp'))
 
+    def _has_ignored_parent(self, class_name: str, visited=None) -> bool:
+        """Recursively check if any parent class should be ignored"""
+        if visited is None:
+            visited = set()
+        
+        if class_name in visited:  # Prevent infinite recursion on circular dependencies
+            return False
+        visited.add(class_name)
+        
+        # Check if this class should be ignored
+        if self._should_ignore_class(class_name):
+            return True
+            
+        # Check parent class if it exists
+        current = class_name
+        while current in self.parent_map:
+            parent = self.parent_map[current]
+            if parent in visited:  # Handle circular dependencies
+                break
+            if self._should_ignore_class(parent):
+                return True
+            current = parent
+            visited.add(current)
+            
+        return False
+
+    def _should_ignore_class(self, class_name: str) -> bool:
+        """Check if class should be ignored based on name or inheritance"""
+        class_name_lower = class_name.lower()
+
+        # Quick check for direct matches in skip classes
+        if class_name_lower in {name.lower() for name in self.skip_classes}:
+            return True
+
+        # Check prefixes
+        if any(class_name_lower.startswith(prefix) for prefix in self.ignore_prefixes):
+            return True
+        if any(class_name_lower.startswith(prefix) for prefix in self.nested_ignore_prefixes):
+            return True
+
+        # Check inheritance
+        if class_name in self.inheritance_tree:
+            parents = self.inheritance_tree[class_name]
+            # Check if any parent should be ignored
+            for parent in parents:
+                parent_lower = parent.lower()
+                if parent_lower in {name.lower() for name in self.skip_classes}:
+                    return True
+                if any(parent_lower.startswith(prefix) for prefix in self.ignore_prefixes):
+                    return True
+                if any(parent_lower.startswith(prefix) for prefix in self.nested_ignore_prefixes):
+                    return True
+
+        return False
+
+    def _is_config_value_context(self, content: str, start_pos: int) -> bool:
+        """Check if position is within a config value context like colorFrame[] = {...}"""
+        # Look backwards for common config array markers
+        line_start = content.rfind('\n', 0, start_pos) + 1
+        line = content[line_start:start_pos].strip().lower()
+        config_markers = ['color', 'rgb', 'rgba', 'size', 'scale', 'offset', 'getvariable']
+        return any(marker in line for marker in config_markers)
+
     def extract_class_names(self, content: str, is_loadout: bool = False) -> Set[str]:
         """Extract potential class names from content"""
         class_names = set()
+        new_inheritance = {}
         
-        # Remove all classes that should be ignored and their contents using regex
-        for ignored_class in self.skip_classes:
-            pattern = rf'class\s+{ignored_class}\s*\{{[^{{]*(?:\{{[^{{]*\}}[^{{]*)*\}}'
-            content = re.sub(pattern, '', content, flags=re.DOTALL)
-            
-        # Remove displayName assignments as these are role descriptions, not class names
-        content = re.sub(r'displayName\s*=\s*["\']([^"\']+)["\']', '', content)
-        
-        # Handle loadout files differently
+        # Extract all inheritance relationships first
+        inheritance_pattern = r'class\s+(\w+)\s*:\s*(\w+)'
+        for match in re.finditer(inheritance_pattern, content):
+            child = match.group(1)
+            parent = match.group(2)
+            if not self._should_ignore_class(parent):  # Only add if parent isn't ignored
+                class_names.add(child)
+                class_names.add(parent)
+                new_inheritance[child] = parent
+
+        # Update inheritance data before continuing
+        if new_inheritance:
+            self._update_inheritance(new_inheritance)
+
+        # Continue with rest of extraction
         if is_loadout:
-            # Extract only equipment classes from arrays
+            # Extract equipment classes from arrays
             array_pattern = r'(?:uniform|vest|backpack|headgear|goggles|primaryWeapon|secondaryWeapon|sidearmWeapon)\[\]\s*=\\s*[\[{]([^}\]]+)[\]}]'
             for match in re.finditer(array_pattern, content):
                 values = match.group(1)
                 class_names.update(re.findall(r'["\']([A-Za-z0-9_]+)(?:\[[^\]]+\])?["\']', values))
         else:
-            # Add patterns for class inheritance
-            inheritance_pattern = r'class\s+(\w+)\s*:\s*(\w+)'
-            for match in re.finditer(inheritance_pattern, content):
-                class_name = match.group(2)  # Get parent class name
-                if (class_name not in {'baseMan', 'rm', 'crew'} and  # Skip common base classes
-                    class_name not in self.skip_classes):  # Skip ai-related classes
-                    class_names.add(class_name)
-        
-            # Ignore special engine entities and default classes 
-            special_classes = self.default_classes
-        
-            # Pattern to find array assignments like uniform[] = { "Class1", "Class2" } or _itemUniform = ["Class1", "Class2"]
-            array_pattern = r'(?:(\w+)\[\]|\b_item\w+)\s*=\\s*[\[{]([^}\]]+)[\]}]'
-        
-            # Find all array assignments
-            for match in re.finditer(array_pattern, content):
-                array_name = match.group(1)
-                # Skip traits array and arsenal init call arguments
-                if array_name and ('traits' in array_name or 'arsenal' in array_name.lower()):
-                    continue
-                
-                # Extract values from the array
-                values = match.group(2)
-                # Find all quoted strings, handling optional [] attachments
-                class_names.update(re.findall(r'["\']([A-Za-z0-9_]+)(?:\[[^\]]+\])?["\']', values))
-        
-            # Fixed: Remove problematic look-behind and use alternative approach
-            # Extract quoted strings that aren't in traits array
-            traits_pattern = r'traits\[\]\s*=\s*\{[^}]*\}'
-            traits_sections = re.findall(traits_pattern, content)
-        
-            # Remove traits sections from content before looking for other class names
-            working_content = content
-            for section in traits_sections:
-                working_content = working_content.replace(section, '')
+            # Process non-loadout files
+            # Remove traits sections first
+            traits_pattern = r'traits\[\]\s*=\\s*\{[^}]*\}'
+            content = re.sub(traits_pattern, '', content)
             
-            # Now look for quoted strings in the remaining content
+            # Extract quoted strings that could be class names
             direct_pattern = r'["\']([A-Za-z0-9_]+)(?:\[[^\]]+\])?["\']'
-            matches = re.findall(direct_pattern, working_content)
-            class_names.update(name for name in matches if name not in self.skip_classes)
-        
-            # Also look for direct class definitions, excluding ai-related
+            for match in re.finditer(direct_pattern, content):
+                if not self._is_config_value_context(content, match.start()):
+                    class_names.add(match.group(1))
+            
+            # Look for array assignments
+            array_pattern = r'(?:(\w+)\[\]|\b_item\w+)\s*=\\s*[\[{]([^}\]]+)[\]}]'
+            for match in re.finditer(array_pattern, content):
+                if match.group(1) and not ('traits' in match.group(1) or 'arsenal' in match.group(1).lower()):
+                    values = match.group(2)
+                    class_names.update(re.findall(r'["\']([A-Za-z0-9_]+)(?:\[[^\]]+\])?["\']', values))
+            
+            # Look for direct class definitions
             class_pattern = r'class\s+(\w+)'
             matches = re.findall(class_pattern, content)
-            class_names.update(name for name in matches if name not in self.skip_classes)
-        
-        return class_names
+            class_names.update(matches)
+            
+        # Filter ignored classes using updated inheritance tree
+        return {name for name in class_names if not self._should_ignore_class(name)}
 
     def extract_sqf_class_names(self, content: str) -> Set[str]:
         """Extract class names from SQF scripting files"""
@@ -210,7 +360,8 @@ class MissionDependencyScanner:
                 if class_name and class_name not in skip_names:  # Skip if it's a known variable name
                     class_names.add(class_name)
         
-        return class_names
+        # Filter out ignored classes
+        return {name for name in class_names if not self._has_ignored_parent(name)}
 
     def _normalize_path(self, path: str) -> str:
         """Normalize asset path for consistent comparison"""
@@ -325,11 +476,11 @@ def extract_mission_name(path: str) -> str:
     mission_name = base.split('.')[0]
     return mission_name
 
-def scan_mission_folder(missions_root: str, class_database: Dict[str, Set[ClassEntry]], asset_database: Dict[str, Set[AssetEntry]]):
+def scan_mission_folder(missions_root: str, class_database: Dict[str, Set[ClassEntry]], 
+                       asset_database: Dict[str, Set[AssetEntry]], cache_mgr=None):
     """Scan multiple missions in the missions folder"""
     reports = []
     
-    # Get immediate subdirectories (mission folders)
     mission_folders = [
         d for d in os.listdir(missions_root) 
         if os.path.isdir(os.path.join(missions_root, d))
@@ -339,14 +490,29 @@ def scan_mission_folder(missions_root: str, class_database: Dict[str, Set[ClassE
         mission_path = os.path.join(missions_root, mission_folder)
         mission_name = extract_mission_name(mission_folder)
         
+        # Try to get cached results first
+        cached_results = None
+        if cache_mgr:
+            cached_results = cache_mgr.get_cached_mission(mission_path)
+            
         scanner = MissionDependencyScanner(class_database, asset_database, mission_name)
         
-        # Scan all .hpp, .cpp and .sqf files in the mission folder
-        for root, _, files in os.walk(mission_path):
-            for file in files:
-                if file.endswith(('.hpp', '.cpp', '.sqf')):
-                    file_path = os.path.join(root, file)
-                    scanner.scan_file(file_path)
+        if cached_results:
+            print(f"Using cached results for {mission_name}")
+            scanner.missing_classes, scanner.missing_assets = cached_results
+        else:
+            print(f"Scanning {mission_name}...")
+            # Scan all .hpp, .cpp and .sqf files in the mission folder
+            for root, _, files in os.walk(mission_path):
+                for file in files:
+                    if file.endswith(('.hpp', '.cpp', '.sqf')):
+                        file_path = os.path.join(root, file)
+                        scanner.scan_file(file_path)
+                        
+            # Cache the results
+            if cache_mgr:
+                cache_mgr.cache_mission(mission_path, 
+                    (scanner.missing_classes, scanner.missing_assets))
         
         reports.append(scanner)
     
