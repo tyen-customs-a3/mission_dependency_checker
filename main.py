@@ -1,50 +1,64 @@
-from database import scan_folder
+from database import scan_folder, parse_class_hierarchy, extract_classes_from_cpp
 from mission_scanner import scan_mission_folder
 from cache_manager import CacheManager
 import os
-import json
 from datetime import datetime
+import logging
 
 def save_report(mission_reports, output_dir="reports", include_found=False):
-    """
-    Save mission reports to JSON file
-    include_found: If True, includes found classes in the report. If False, only missing classes are saved.
-    """
+    """Save mission reports in clear text format"""
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = os.path.join(output_dir, f"mission_report_{timestamp}.json")
-    
-    report_data = {
-        "timestamp": timestamp,
-        "missions": []
-    }
-    
-    for scanner in mission_reports:
-        mission_data = {
-            "name": scanner.mission_name,
-            "missing_classes": sorted(list(scanner.missing_classes)),
-            "missing_assets": sorted(list(scanner.missing_assets))
-        }
-        
-        # Only include found classes if flag is set
-        if include_found:
-            mission_data["found_classes"] = {}
-            for class_name in sorted(scanner.found_classes):
-                for mod, entries in scanner.class_database.items():
-                    if any(entry.name == class_name for entry in entries):
-                        if mod not in mission_data["found_classes"]:
-                            mission_data["found_classes"][mod] = []
-                        mission_data["found_classes"][mod].append(class_name)
-                        break
-            mission_data["found_assets"] = sorted(list(scanner.found_assets))
-                    
-        report_data["missions"].append(mission_data)
+    output_file = os.path.join(output_dir, f"mission_report_{timestamp}.txt")
     
     with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(report_data, f, indent=2)
+        f.write("MISSION SCANNER REPORT\n")
+        f.write("====================\n")
+        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         
+        for scanner in mission_reports:
+            f.write(f"Mission: {scanner.mission_name}\n")
+            f.write("=" * (len(scanner.mission_name) + 9) + "\n")
+            
+            if scanner.missing_classes:
+                f.write("\nMissing Classes:\n")
+                f.write("-" * 15 + "\n")
+                for class_name in sorted(scanner.missing_classes):
+                    f.write(f"  {class_name}\n")
+            
+            if scanner.missing_assets:
+                f.write("\nMissing Assets:\n")
+                f.write("-" * 14 + "\n")
+                for asset in sorted(scanner.missing_assets):
+                    f.write(f"  {asset}\n")
+            
+            if include_found:
+                if scanner.found_classes:
+                    f.write("\nFound Classes:\n")
+                    f.write("-" * 13 + "\n")
+                    by_source = {}
+                    for class_name in sorted(scanner.found_classes):
+                        source = next((mod for mod, entries in scanner.class_database.items() 
+                                     if any(entry.name == class_name for entry in entries)), "unknown")
+                        if source not in by_source:
+                            by_source[source] = []
+                        by_source[source].append(class_name)
+                    
+                    for source in sorted(by_source.keys()):
+                        f.write(f"\n  {source}:\n")
+                        for class_name in sorted(by_source[source]):
+                            f.write(f"    {class_name}\n")
+                
+                if scanner.found_assets:
+                    f.write("\nFound Assets:\n")
+                    f.write("-" * 12 + "\n")
+                    for asset in sorted(scanner.found_assets):
+                        f.write(f"  {asset}\n")
+            
+            f.write("\n" + "=" * 60 + "\n\n")
+    
     print(f"\nReport saved to: {output_file}")
 
 def print_quick_summary(mission_reports):
@@ -66,36 +80,62 @@ def print_quick_summary(mission_reports):
                     print(f"    - {asset_path}")
 
 def main():
-    # Initialize cache manager
-    cache_mgr = CacheManager()
-    
-    # Scan mods folder first to build class database
-    mods_folder = r"C:\pcanext_extracted"
-    mission_folder = r"C:\pca_missions"
+    try:
+        logger = logging.getLogger(__name__)
+        logger.info("Starting mission scanner...")
 
-    if not os.path.exists(mods_folder):
-        print("Error: Mods folder does not exist!")
-        return
+        # Initialize cache manager and empty databases
+        cache_mgr = CacheManager()
+        class_database = {}
+        asset_database = set()
+        
+        # Define paths
+        mods_folder = r"C:\pcanext"
+        mission_folder = r"C:\pca_missions"
+        cpp_file_path = os.path.join(os.path.dirname(__file__), "classes", "classes_pcanext.cpp")
+        cpp_file_path = r"C:\Users\Tyen\Desktop\outou\Tyen.vars.Arma3Profile.cpp"
 
-    print(f"\nScanning mods folder: {mods_folder}")
-    # Try to get cached results first
-    cached_results = cache_mgr.get_cached_scan(mods_folder)
-    if cached_results:
-        print("Using cached mod scan results")
-        class_database, asset_database = cached_results
-    else:
-        print("Performing full mod scan...")
-        class_database, asset_database = scan_folder(mods_folder)
-        cache_mgr.cache_scan(mods_folder, (class_database, asset_database))
-    
-    print(f"\nScanning mission folder: {mission_folder}")
-    mission_reports = scan_mission_folder(mission_folder, class_database, asset_database, cache_mgr)
-    
-    # Print quick summary before detailed report
-    print_quick_summary(mission_reports)
-    
-    # Save report to disk
-    save_report(mission_reports, include_found=False)
+        # Process the cpp file containing class data
+        logger.info(f"\nScanning cpp file: {cpp_file_path}")
+        class_entries_by_category = extract_classes_from_cpp(cpp_file_path)
+        
+        # Process entries and build class database by category
+        class_database = {}
+        for category, entries in class_entries_by_category.items():
+            logger.info(f"Processing category: {category}")
+            for entry in entries:
+                class_entry = parse_class_hierarchy(entry)
+                if not class_entry:
+                    continue
+                    
+                for entry in class_entry.values():
+                    if entry.source not in class_database:
+                        class_database[entry.source] = set()
+                    class_database[entry.source].add(entry)
+
+        # Print database summary
+        logger.info("\nClass Database Summary:")
+        for source, entries in class_database.items():
+            logger.info(f"{source}: {len(entries)} classes")
+
+        # Scan mods folder for assets
+        if not os.path.exists(mods_folder):
+            logger.error("Error: Mods folder does not exist!")
+            return
+
+        logger.info(f"\nScanning mods folder: {mods_folder}")
+        asset_database = scan_folder(mods_folder)
+        
+        # Scan missions
+        logger.info(f"\nScanning mission folder: {mission_folder}")
+        mission_reports = scan_mission_folder(mission_folder, class_database, asset_database, cache_mgr)
+        
+        # Generate reports
+        print_quick_summary(mission_reports)
+        save_report(mission_reports, include_found=False)
+        
+    finally:
+        print("\nMission scanner finished.")
 
 if __name__ == "__main__":
     main()

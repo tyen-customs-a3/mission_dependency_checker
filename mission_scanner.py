@@ -1,26 +1,32 @@
 import re
 import os
-from typing import Set, Dict, Tuple
+from typing import Set, Dict, Tuple, Optional
 from database import ClassEntry, AssetEntry, scan_for_assets
 
 class MissionDependencyScanner:
     def __init__(self, class_database: Dict[str, Set[ClassEntry]], 
-                 asset_database: Set[str], 
+                 asset_database: Set[str],  # Change from Dict to Set
                  mission_name: str):
         self.class_database = class_database
         self.asset_database = asset_database.copy()  # Create a copy to add mission-local assets
         self.mission_name = mission_name
-        # Flatten database for easier searching
-        self.all_classes = {
-            entry.name for entries in class_database.values() 
-            for entry in entries
-        }
+        # Flatten database for easier searching, including paths
+        self.all_classes = set()
+        self.class_paths = set()
+        for entries in class_database.values():
+            for entry in entries:
+                self.all_classes.add(entry.name)
+                if entry.path:
+                    self.class_paths.add(entry.path)
+                if entry.get_full_path():
+                    self.class_paths.add(entry.get_full_path())
         # Asset database is already a set of paths
         self.all_assets = {self._normalize_path(path) for path in asset_database}
         self.missing_classes = set()
         self.found_classes = set()
         self.missing_assets = set()
         self.found_assets = set()
+        self.mission_classes = set()  # Track classes defined in mission
         
         # Add default/engine classes that always exist
         self.default_classes = {
@@ -106,11 +112,15 @@ class MissionDependencyScanner:
         self.parent_map = {}  # Direct parent lookup: child -> parent
         self.inheritance_tree = {}  # Full inheritance chain: class -> set(all ancestors)
         
-        # Build initial parent map from mod database
+        # Build initial parent map from mod database including all relationships
         for entries in class_database.values():
             for entry in entries:
                 if entry.parent:
-                    self.parent_map[entry.name] = entry.parent
+                    self.parent_map[entry.class_name] = entry.parent
+                    # Also add the full path to class_paths
+                    full_path = entry.get_full_path()
+                    if full_path:
+                        self.class_paths.add(full_path)
         
         # Build complete inheritance tree
         self._build_inheritance_tree()
@@ -167,6 +177,12 @@ class MissionDependencyScanner:
         """Update inheritance info with newly discovered classes"""
         # Add new parent relationships
         self.parent_map.update(new_classes)
+        
+        # Update class paths with new relationships
+        for child, parent in new_classes.items():
+            path = f"{parent}/{child}"
+            self.class_paths.add(path)
+            
         # Rebuild entire inheritance tree to include new relationships
         self._build_inheritance_tree()
         
@@ -248,6 +264,20 @@ class MissionDependencyScanner:
         class_names = set()
         new_inheritance = {}
         
+        # First scan for class definitions in mission
+        class_def_pattern = r'class\s+(\w+)(?:\s*:\s*(\w+))?'
+        for match in re.finditer(class_def_pattern, content):
+            class_name = match.group(1)
+            parent = match.group(2)
+            
+            # Add to mission-defined classes
+            self.mission_classes.add(class_name)
+            
+            # Handle inheritance if present
+            if parent and not self._should_ignore_class(parent):
+                class_names.add(parent)
+                new_inheritance[class_name] = parent
+
         # Extract all inheritance relationships first
         inheritance_pattern = r'class\s+(\w+)\s*:\s*(\w+)'
         for match in re.finditer(inheritance_pattern, content):
@@ -365,21 +395,46 @@ class MissionDependencyScanner:
 
     def _normalize_path(self, path: str) -> str:
         """Normalize asset path for consistent comparison"""
-        # Remove leading a3/ and z/ if present since extracted paths don't have them
-        path = re.sub(r'^/?(?:a3/|z/)', '', path.lower())
+        # Convert to lowercase and normalize slashes
+        path = path.lower().replace('\\', '/').replace('//', '/')
+        
+        # Remove common prefixes
+        prefixes = ['a3/', 'z/', './', '../']
+        for prefix in prefixes:
+            if path.startswith(prefix):
+                path = path[len(prefix):]
+        
         # Remove leading slash if present 
-        path = re.sub(r'^/', '', path)
-        # Normalize slashes
-        return path.replace('\\', '/').replace('//', '/')
+        path = path.lstrip('/')
+        
+        # Handle addons prefix
+        if 'addons/' in path:
+            path = path[path.find('addons/') + 7:]
+            
+        return path
 
     def _path_matches(self, search_path: str, database_paths: Set[str]) -> bool:
-        """Check if path matches any database path, including suffix matches"""
+        """Check if path matches any database path, including partial matches"""
         norm_search = self._normalize_path(search_path)
+        
         # Try exact match first
         if norm_search in database_paths:
             return True
+            
         # Try suffix match
-        return any(db_path.endswith(norm_search) for db_path in database_paths)
+        if any(db_path.endswith(norm_search) for db_path in database_paths):
+            return True
+            
+        # Try partial path matching
+        search_parts = norm_search.split('/')
+        if len(search_parts) > 1:
+            # Try matching just the last two path components
+            partial_path = '/'.join(search_parts[-2:])
+            matches = [p for p in database_paths if partial_path in p]
+            if matches:
+                return True
+                
+        return False
 
     def extract_asset_paths(self, content: str) -> Set[str]:
         """Extract asset paths from content"""
@@ -411,6 +466,50 @@ class MissionDependencyScanner:
         
         return asset_paths
 
+    def find_class_in_database(self, class_name: str, check_children: bool = True) -> Optional[ClassEntry]:
+        """Recursively search for a class in the database by name"""
+        class_name_lower = class_name.lower()
+        
+        # First try direct lookup in all classes
+        if class_name in self.all_classes:
+            for entries in self.class_database.values():
+                for entry in entries:
+                    if entry.class_name == class_name:
+                        return entry
+
+        # Try case-insensitive search
+        for entries in self.class_database.values():
+            for entry in entries:
+                # Check direct name match (case-insensitive)
+                if entry.class_name.lower() == class_name_lower:
+                    return entry
+                
+                # Recursively check children if available and enabled
+                if check_children and entry.children:
+                    def search_children(children):
+                        for child in children:
+                            if isinstance(child, dict):
+                                if child.get("class", "").lower() == class_name_lower:
+                                    # Create entry for child
+                                    return ClassEntry(
+                                        class_name=child["class"],
+                                        source=child.get("source", entry.source),
+                                        category=child.get("category", entry.category),
+                                        parent=entry.class_name
+                                    )
+                                # Recursively search nested children
+                                if "children" in child:
+                                    result = search_children(child["children"])
+                                    if result:
+                                        return result
+                        return None
+
+                    child_result = search_children(entry.children)
+                    if child_result:
+                        return child_result
+
+        return None
+
     def scan_file(self, file_path: str) -> Tuple[Set[str], Set[str]]:
         """Scan a single mission file for dependencies and assets"""
         try:
@@ -424,27 +523,32 @@ class MissionDependencyScanner:
             # Get asset dependencies
             asset_paths = self.extract_asset_paths(content)
             
-            # Check each class against database
+            # Check each class against database, excluding mission-defined classes
             for class_name in class_names:
-                if class_name in self.all_classes:
+                if class_name in self.mission_classes:
+                    continue  # Skip classes defined in mission
+                
+                # Try to find the class in the database
+                found_entry = self.find_class_in_database(class_name)
+                if found_entry:
                     self.found_classes.add(class_name)
                 elif not (self.is_loadout_file(file_path) and class_name in self.role_classes):
                     # Don't report missing classes for role definitions in loadout files
                     if not class_name.lower() in {'true', 'false', 'nil', 'null', 'obj', 'player', 'this'}:
                         self.missing_classes.add(class_name)
+                        print(f"Class: {class_name}")
             
-            # Check assets against database
+            # Check assets against database with better logging
             for asset_path in asset_paths:
                 normalized_path = self._normalize_path(asset_path)
+                
                 if self._path_matches(normalized_path, self.all_assets):
                     self.found_assets.add(normalized_path)
-                else:
-                    self.missing_assets.add(normalized_path)
             
             return class_names, asset_paths
 
         except Exception as e:
-            print(f"Error scanning {file_path}: {str(e)}")
+            print(f"ERROR: Error scanning {file_path}: {str(e)}")
             return set(), set()
 
     def print_report(self):
@@ -452,17 +556,28 @@ class MissionDependencyScanner:
         print(f"\nMission: {self.mission_name}")
         print("=" * (len(self.mission_name) + 9))
         
+        print(f"\nMission-defined Classes: {len(self.mission_classes)}")
+        for class_name in sorted(self.mission_classes):
+            print(f"  {class_name}")
+            
         print(f"\nFound Classes: {len(self.found_classes)}")
         for class_name in sorted(self.found_classes):
-            # Find which mod it belongs to
-            for mod, entries in self.class_database.items():
-                if any(entry.name == class_name for entry in entries):
-                    print(f"  {class_name} [{mod}]")
-                    break
+            # Find the full entry in the database
+            entry = self.find_class_in_database(class_name)
+            if entry:
+                print(f"  {class_name} [{entry.source}] -> {entry.get_full_path()}")
+            else:
+                print(f"  {class_name}")
         
         print(f"\nMissing Classes: {len(self.missing_classes)}")
         for class_name in sorted(self.missing_classes):
             print(f"  {class_name}")
+            # Try to find similar classes for debugging
+            similar = [path for path in self.class_paths if class_name.lower() in path.lower()]
+            if similar:
+                print("    Similar classes found:")
+                for s in sorted(similar)[:3]:  # Show up to 3 similar classes
+                    print(f"    - {s}")
         
         print(f"\nMissing Assets: {len(self.missing_assets)}")
         for asset_path in sorted(self.missing_assets):
@@ -489,31 +604,17 @@ def scan_mission_folder(missions_root: str, class_database: Dict[str, Set[ClassE
     for mission_folder in sorted(mission_folders):
         mission_path = os.path.join(missions_root, mission_folder)
         mission_name = extract_mission_name(mission_folder)
-        
-        # Try to get cached results first
-        cached_results = None
-        if cache_mgr:
-            cached_results = cache_mgr.get_cached_mission(mission_path)
-            
+
         scanner = MissionDependencyScanner(class_database, asset_database, mission_name)
         
-        if cached_results:
-            print(f"Using cached results for {mission_name}")
-            scanner.missing_classes, scanner.missing_assets = cached_results
-        else:
-            print(f"Scanning {mission_name}...")
-            # Scan all .hpp, .cpp and .sqf files in the mission folder
-            for root, _, files in os.walk(mission_path):
-                for file in files:
-                    if file.endswith(('.hpp', '.cpp', '.sqf')):
-                        file_path = os.path.join(root, file)
-                        scanner.scan_file(file_path)
-                        
-            # Cache the results
-            if cache_mgr:
-                cache_mgr.cache_mission(mission_path, 
-                    (scanner.missing_classes, scanner.missing_assets))
-        
+        print(f"Scanning {mission_name}...")
+        # Scan all .hpp, .cpp and .sqf files in the mission folder
+        for root, _, files in os.walk(mission_path):
+            for file in files:
+                if file.endswith(('.hpp', '.cpp', '.sqf')):
+                    file_path = os.path.join(root, file)
+                    scanner.scan_file(file_path)
+                    
         reports.append(scanner)
     
     return reports
