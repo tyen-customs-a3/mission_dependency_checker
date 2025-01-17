@@ -7,12 +7,13 @@ logger = logging.getLogger(__name__)
 
 def save_report(mission_reports, output_dir="reports", include_found=False, task_name=""):
     """Save mission reports in clear text format"""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    name_part = f"_{task_name}" if task_name else ""
-    output_file = os.path.join(output_dir, f"mission_report{name_part}_{timestamp}.txt")
+    task_folder = os.path.join(output_dir, f"{task_name}_{timestamp}" if task_name else f"default_{timestamp}")
+    
+    if not os.path.exists(task_folder):
+        os.makedirs(task_folder)
+    
+    output_file = os.path.join(task_folder, "mission_report.txt")
     
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(f"MISSION SCANNER REPORT - {task_name or 'Default'}\n")
@@ -69,6 +70,8 @@ def save_report(mission_reports, output_dir="reports", include_found=False, task
                 f.write(f"  {mission}\n")
     
     print(f"\nReport saved to: {output_file}")
+
+    return task_folder, timestamp  # Return these for use with debug files
 
 def print_quick_summary(mission_reports):
     """Print a quick summary of missing classes across all missions"""

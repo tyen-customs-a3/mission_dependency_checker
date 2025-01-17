@@ -28,13 +28,8 @@ def scan_mission_folder(missions_root: str, class_database, asset_database, cach
         scanner = MissionDependencyScanner(class_database, asset_database, mission_name)
         
         print(f"Scanning {mission_name}...")
-        # Scan all .hpp, .cpp and .sqf files in the mission folder
-        for root, _, files in os.walk(mission_path):
-            for file in files:
-                if file.endswith(('.hpp', '.cpp', '.sqf')):
-                    file_path = os.path.join(root, file)
-                    scanner.scan_file(file_path)
-                    
+        # Use the new scan_mission method instead of scanning individual files
+        scanner.scan_mission(mission_path)
         reports.append(scanner)
     
     return reports

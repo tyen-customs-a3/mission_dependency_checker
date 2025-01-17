@@ -18,10 +18,9 @@ def _get_debug_folder(output_dir: str, task_name: str) -> str:
         os.makedirs(_task_folders[task_name], exist_ok=True)
     return _task_folders[task_name]
 
-def write_debug_class_dump(database: Dict[str, Set[ClassEntry]], output_dir: str, task_name: str) -> None:
+def write_debug_class_dump(database: Dict[str, Set[ClassEntry]], output_folder: str, task_name: str) -> None:
     """Write a human-readable dump of the class database in a table format"""
-    debug_folder = _get_debug_folder(output_dir, task_name)
-    output_file = os.path.join(debug_folder, "class_dump.txt")
+    output_file = os.path.join(output_folder, "class_dump.txt")
     
     # Define column widths
     col_widths = {
@@ -68,10 +67,9 @@ def write_debug_class_dump(database: Dict[str, Set[ClassEntry]], output_dir: str
     
     logger.info(f"Class database dump written to: {output_file}")
 
-def write_debug_class_csv(database: Dict[str, ClassEntry], output_dir: str, task_name: str) -> None:
+def write_debug_class_csv(database: Dict[str, ClassEntry], output_folder: str, task_name: str) -> None:
     """Write parsed class database to debug CSV file"""
-    debug_folder = _get_debug_folder(output_dir, task_name)
-    output_file = os.path.join(debug_folder, "class_database.csv")
+    output_file = os.path.join(output_folder, "class_database.csv")
     
     with open(output_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f, quoting=csv.QUOTE_ALL, escapechar='\\')

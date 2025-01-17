@@ -69,10 +69,6 @@ def process_scan_task(task: ScanTask, cache_mgr: CacheManager, logger: logging.L
             traceback.print_exc()
             return False
 
-        # Write debug files to debug directory
-        write_debug_class_dump(class_database, "debug", task.name)
-        write_debug_class_csv(all_entries, "debug", task.name)
-        
         logger.info(f"Class database built for {task.name}")
 
         logger.info(f"\nScanning mods folder: {task.mods_folder}")
@@ -93,9 +89,14 @@ def process_scan_task(task: ScanTask, cache_mgr: CacheManager, logger: logging.L
         logger.info(f"\nScanning mission folder: {task.mission_folder}")
         mission_reports = scan_mission_folder(str(task.mission_folder), class_database, asset_database, cache_mgr)
         
-        # Generate reports
+        # Generate reports first to get the output folder
         print_quick_summary(mission_reports)
-        save_report(mission_reports, include_found=False, task_name=task.name)
+        output_folder, _ = save_report(mission_reports, include_found=False, task_name=task.name)
+        
+        # Write debug files to the same output folder
+        write_debug_class_dump(class_database, output_folder, task.name)
+        write_debug_class_csv(all_entries, output_folder, task.name)
+        
         return True
 
     except Exception as e:
