@@ -1,3 +1,7 @@
 __pycache__/
 reports/
 .cache/
+
+# Asset cache
+temp/asset_cache.db
+debug/
