@@ -1,214 +1,116 @@
-// Output format:
-// [{"class":"AllVehicles","source":"A3","category":"CfgVehicles","parent":""}]
+// File Format Description:
+// -----------------------
+// Database: ConfigExtract_YYYY-MM-DD_HH-MM-SS.ini
+//
+// Sections:
+// 1. Validation
+//    - Keys: TotalClasses, Categories, Stats_CategoryName
+// 2. CategoryData_[CategoryName]
+//    - Keys: CSV lines with format ClassName,Source,Category,Parent
+//
+// Note: Ensure INIDBI2 is configured and available before running this script.
+
+// Debug flag to control category scope
+private _debugMode = false;  // Set to true for limited testing categories
 
 private ["_classHierarchy", "_configs"];
 
-// Collect every top-level config category from configFile
-private _categories = [];
+// Define categories based on debug mode
+private _categories = if (_debugMode) then {
+    // Limited set for testing/debugging
+    ["CfgWeapons", "CfgVehicles"]
+} else {
+    // Scan for all available categories in configFile
+    private _allCategories = [];
+    for "_i" from 0 to (count configFile - 1) do {
+        private _entry = configFile select _i;
+        if (isClass _entry) then {
+            _allCategories pushBack (configName _entry);
+        };
+    };
+    _allCategories
+};
 
-// Define essential base categories that must be included
-_categories = ["CfgVehicles", "CfgWeapons", "CfgMagazines", "CfgAmmo", "CfgGroups"];
+diag_log text format ["Running in %1 mode with %2 categories", ["FULL", "DEBUG"] select _debugMode, count _categories];
 
-// // Add core A3 categories that contain base classes
-// _categories append [
-//     "CfgFactionClasses",
-//     "CfgVehicleClasses", 
-//     "CfgEditorSubcategories",
-//     "CfgRoles",
-//     "CfgMen",
-//     "CfgBrains",
-//     "CfgSoldierFamilies"
-// ];
+diag_log text format ["Starting config extraction..."];
 
-// // Debug: use important categories only
-// _categories = ["CfgVehicles", "CfgWeapons", "CfgMagazines", "CfgAmmo", "CfgGroups", "CfgFactionClasses", "CfgPatches"];
+// Initialize database early
+private _timestamp = systemTime apply { if (_x < 10) then { "0" + str _x } else { str _x } };
+private _dbName = format ["ConfigExtract_%1-%2-%3_%4-%5-%6", 
+    _timestamp#0, _timestamp#1, _timestamp#2,
+    _timestamp#3, _timestamp#4, _timestamp#5
+];
+private _db = ["new", _dbName] call OO_INIDBI;
 
-// // Debug: use only one category
-// _categories = ["CfgWeapons"];
+// Track statistics during processing
+private _totalClasses = 0;
+private _categoryStats = createHashMap;
 
-diag_log text format ["[PCA] Starting config extraction..."];
-_classHierarchy = createHashMap;
-private _parentCache = createHashMap;
+// Simplified CSV line writer
+private _writeCsvLine = {
+    params ["_section", "_className", "_source", "_category", "_parent"];
+    private _csvLine = format ["%1,%2,%3,%4", _className, _source, _category, _parent];
+    ["write", [_section, _className, _csvLine]] call _db;
+};
 
 // Process each category
 {
     private _category = _x;
-    diag_log text format ["[PCA] Processing %1...", _category];
+    private _sectionName = format ["CategoryData_%1", _category];
+    private _categoryCount = 0;
     
-    // Pre-allocate arrays based on typical sizes
-    private _classes = [];
-    _classes resize 10000;
-    private _classCount = 0;
-
-    // Optimized class collection
-    private _getAllClasses = {
-        params ["_config", ["_depth", 0]];
-        private _localClasses = [];
-        _localClasses resize (count _config);
-        private _localCount = 0;
+    // Write header
+    ["write", [_sectionName, "header", "ClassName,Source,Category,Parent"]] call _db;
+    
+    // Combined class collection and processing
+    private _processConfig = {
+        params ["_config"];
         
         for "_i" from 0 to (count _config - 1) do {
             private _entry = _config select _i;
             if (isClass _entry) then {
-                // Store class
-                _localClasses set [_localCount, _entry];
-                _localCount = _localCount + 1;
-                
-                // Process parents only if not already cached
                 private _className = configName _entry;
-                if (isNil {_parentCache getOrDefault [_className, nil]}) then {
+                if (_className != "") then {
+                    // Process class data
+                    private _sourceList = configSourceModList _entry;
+                    private _source = if (count _sourceList > 0) then { _sourceList select 0 } else { "A3" };
                     private _parent = inheritsFrom _entry;
-                    private _parentChain = [];
-                    while {!isNull _parent} do {
-                        _parentChain pushBack _parent;
-                        _parent = inheritsFrom _parent;
-                    };
-                    _parentCache set [_className, _parentChain];
+                    private _parentName = if (!isNull _parent) then { configName _parent } else { "" };
                     
-                    // Add parents to local classes
-                    {
-                        _localClasses set [_localCount, _x];
-                        _localCount = _localCount + 1;
-                    } forEach _parentChain;
+                    // Write immediately
+                    [_sectionName, _className, _source, _category, _parentName] call _writeCsvLine;
+                    
+                    // Update statistics
+                    _totalClasses = _totalClasses + 1;
+                    _categoryCount = _categoryCount + 1;
+                    
+                    // Process child classes
+                    [_entry] call _processConfig;
                 };
-                
-                // Recurse into children
-                _localClasses append ([_entry, _depth + 1] call _getAllClasses);
             };
         };
-        
-        _localClasses resize _localCount;
-        _localClasses
     };
-
-    private _configs = [(configFile >> _category)] call _getAllClasses;
-
-    // Process classes in batches for better performance
-    private _batchSize = 1000;
-    private _batches = ceil(count _configs / _batchSize);
     
-    for "_batch" from 0 to (_batches - 1) do {
-        private _start = _batch * _batchSize;
-        private _end = (_start + _batchSize) min (count _configs);
-        
-        for "_i" from _start to (_end - 1) do {
-            private _entry = _configs select _i;
-            private _className = configName _entry;
-            
-            if (_className != "") then {
-                private _sourceList = configSourceModList _entry;
-                private _source = if (count _sourceList > 0) then { _sourceList select 0 } else { "A3" };
-                private _parentChain = _parentCache getOrDefault [_className, []];
-                private _parent = if (count _parentChain > 0) then { _parentChain select 0 } else { configNull };
-                private _parentName = if (!isNull _parent) then { configName _parent } else { "" };
-                
-                _classHierarchy set [_className, [_source, _parentName, _category]];
-            };
-        };
-        
-        if (_batch % 10 == 0) then {
-            diag_log text format ["[PCA] Processed batch %1 of %2 for %3", _batch + 1, _batches, _category];
-        };
-    };
+    diag_log text format ["Processing %1...", _category];
+    [(configFile >> _category)] call _processConfig;
+    
+    // Store category statistics
+    _categoryStats set [_category, _categoryCount];
+    
+    diag_log text format ["Processed %1 classes for %2", _categoryCount, _category];
 } forEach _categories;
 
-// CSV generation with minimal overhead
-private _safeStr = {
-    params ["_str"];
-    private _buffer = "";
-    {
-        switch (_x) do {
-            case 44: { _buffer = _buffer + "\,"; };  // Escape commas
-            case 34: { _buffer = _buffer + '""'; };  // Double quotes for CSV
-            case 10: { _buffer = _buffer + " "; };   // Replace newlines with space
-            case 13: { _buffer = _buffer + " "; };   // Replace carriage returns with space
-            default {
-                if (_x >= 32 && _x <= 126) then {
-                    _buffer = _buffer + toString [_x];
-                };
-            };
-        };
-    } forEach toArray _str;
-    _buffer
-};
+// Write validation info at the end
+["write", ["Validation", "TotalClasses", _totalClasses]] call _db;
+["write", ["Validation", "Categories", _categories]] call _db;
 
-private _generateCsvLine = {
-    params ["_className"];
-    private _data = _classHierarchy get _className;
-    if (isNil "_data") exitWith {
-        format ['"%1","-","-","-"', [_className] call _safeStr]
-    };
-
-    private ["_source", "_parent", "_category"];
-    _source = _data select 0;
-    _parent = _data select 1;
-    _category = _data select 2;
-
-    // Ensure all fields are properly quoted and escaped
-    format ['"%1","%2","%3","%4"',
-        [_className] call _safeStr,
-        [_source] call _safeStr,
-        [_category] call _safeStr,
-        [_parent] call _safeStr
-    ]
-};
-
-// Process categories into separate chunks
 {
-    private _category = _x;
-    private _categoryClasses = createHashMap;
-    
-    // Filter classes for this category
-    {
-        private _className = _x;
-        private _data = _classHierarchy get _className;
-        if (_data select 2 == _category) then {
-            _categoryClasses set [_className, _data];
-        };
-    } forEach keys _classHierarchy;
-    
-    if (count _categoryClasses > 0) then {
-        private _chunks = [];
-        private _currentChunk = [];
-        private _maxChunkSize = 1024 * 1024;
-        private _processedClasses = 0;
-        
-        // Add CSV header to first chunk
-        _currentChunk = ['"ClassName","Source","Category","Parent"'];
-        
-        {
-            private _csvLine = [_x] call _generateCsvLine;
-            private _currentSize = count (_currentChunk joinString toString [10]);
-            
-            if (_currentSize + count _csvLine + 1 > _maxChunkSize) then {
-                _chunks pushBack (_currentChunk joinString toString [10]);
-                _currentChunk = [_csvLine];
-            } else {
-                _currentChunk pushBack _csvLine;
-            };
-            
-            _processedClasses = _processedClasses + 1;
-        } forEach keys _categoryClasses;
-        
-        if (count _currentChunk > 0) then {
-            _chunks pushBack (_currentChunk joinString toString [10]);
-        };
-        
-        // Store chunks for this category
-        {
-            private _chunkNum = _forEachIndex + 1;
-            private _chunkKey = format ["extractedCsv_%1_%2", _category, _chunkNum];
-            profileNamespace setVariable [_chunkKey, _x];
-            
-            if (_forEachIndex == 0) then {
-                profileNamespace setVariable [format ["extractedCsv_%1_count", _category], count _chunks];
-                profileNamespace setVariable [format ["extractedCsv_%1_totalClasses", _category], count _categoryClasses];
-            };
-            
-            saveProfileNamespace;
-            diag_log text format ["[PCA] Saved %1 chunk %2 of %3", _category, _chunkNum, count _chunks];
-        } forEach _chunks;
-    };
+    private _statsKey = format ["Stats_%1", _x];
+    ["write", ["Validation", _statsKey, _categoryStats get _x]] call _db;
 } forEach _categories;
 
-diag_log text format ["[PCA] Completed config extraction for %1 categories", count _categories];
+// Clean up
+["delete", _db] call OO_INIDBI;
+
+diag_log text format ["Completed config extraction to %1", _dbName];

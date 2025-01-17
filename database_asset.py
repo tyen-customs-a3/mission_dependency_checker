@@ -18,18 +18,41 @@ class AssetEntry:
 
 # Remove load_class_database function as it's not used anymore
 
+def normalize_path(path: str, is_arma3: bool = False) -> str:
+    """Normalize asset path consistently"""
+    # 1. Convert backslashes to forward slashes
+    norm_path = path.replace('\\', '/').lower()
+    
+    # 2. Remove any double a3 prefixes
+    while 'a3/a3/' in norm_path:
+        norm_path = norm_path.replace('a3/a3/', 'a3/')
+    
+    # 3. Clean up slashes
+    norm_path = norm_path.strip('/').replace('//', '/')
+    
+    # 4. Ensure a3 prefix for Arma assets if missing
+    if is_arma3 and not norm_path.startswith('a3/'):
+        norm_path = f"a3/{norm_path}"
+    
+    return norm_path
+
 def scan_for_assets(folder_path: str) -> Set[str]:
     """Scan folder for asset files"""
     assets = set()
+    is_arma3 = 'arma 3' in folder_path.lower()
     
     for root, _, files in os.walk(folder_path):
         for file in files:
             if file.lower().endswith(('.paa', '.p3d', '.wss', '.ogg', '.wav', '.jpg', '.png')):
-                rel_path = os.path.relpath(os.path.join(root, file), folder_path)
-                # Normalize path
-                norm_path = rel_path.replace('\\', '/').lower()
-                assets.add(norm_path)
+                # Get full path and make it relative to folder_path
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, folder_path)
                 
+                # Normalize the path
+                norm_path = normalize_path(rel_path, is_arma3)
+                logger.debug(f"Found asset: {norm_path} (original: {rel_path})")
+                assets.add(norm_path)
+    
     return assets
 
 
@@ -70,18 +93,36 @@ def process_pbo(pbo_path: str, task_name: str, cache_mgr) -> Tuple[Optional[str]
         # Get list of files in PBO
         pbo_contents = get_pbo_contents(pbo_path)
         
-        # Extract prefix
+        # Extract prefix from properties section
         for line in pbo_contents:
-            if 'prefix=' in line:
-                prefix = line.split('=')[1].strip()
+            if line.startswith('prefix='):
+                prefix = line.split('=')[1].strip(';').strip()
                 break
         
         if not prefix:
+            logger.warning(f"No prefix found in PBO: {pbo_path}")
             return None, set()
         
+        # Process each file in the PBO
+        in_properties = False
         for line in pbo_contents:
+            # Skip properties section
+            if line.startswith('//<'):
+                in_properties = True
+                continue
+            if line.startswith('//</'):
+                in_properties = False
+                continue
+            if in_properties or line.startswith('//'):
+                continue
+                
+            # Check if file has an asset extension
             if line.lower().endswith(('.paa', '.p3d', '.wss', '.ogg', '.wav')):
-                norm_path = f"{prefix}/{line}".replace('\\', '/').lower()
+                # Apply consistent path normalization
+                norm_path = normalize_path(
+                    f"{prefix}/{line}", 
+                    is_arma3='arma 3' in pbo_path.lower()
+                )
                 assets.add(norm_path)
         
         # Update cache
@@ -102,7 +143,7 @@ def _process_pbo_worker(args: Tuple[str, str, object]) -> Tuple[str, Optional[st
     prefix, assets = process_pbo(pbo_path, task_name, cache_mgr)
     return pbo_path, prefix, assets
 
-def scan_folder(folder_path: str, task_name: str, task_hash: str, cache_mgr, max_workers: int = None) -> Set[str]:
+def scan_folder(folder_path: str, task_name: str, task_hash: str, cache_mgr: 'CacheManager', max_workers: int = None) -> Set[str]:
     """Scan folder for PBO files and process them in parallel"""
     # Check if we need to initialize/reset cache
     if not cache_mgr.check_asset_cache_valid(task_name, task_hash):
@@ -153,9 +194,20 @@ def scan_arma3_base(arma_path: str, task_name: str, cache_mgr) -> Set[str]:
     
     task_hash = hashlib.md5(arma_path.encode()).hexdigest()
     try:
-        assets = scan_folder(arma_path, f"{task_name}_base", task_hash, cache_mgr)
-        logger.info(f"Found {len(assets)} total assets in Arma 3 installation")
-        return assets
+        # Direct scan for vanilla assets first
+        vanilla_assets = scan_for_assets(arma_path)
+        logger.info(f"Direct scan found {len(vanilla_assets)} vanilla assets")
+        
+        # Now scan PBOs as well
+        pbo_assets = scan_folder(arma_path, f"{task_name}_base", task_hash, cache_mgr)
+        logger.info(f"PBO scan found {len(pbo_assets)} additional assets")
+        
+        # Combine both sets
+        all_assets = vanilla_assets | pbo_assets
+        logger.info(f"Total unique assets found: {len(all_assets)}")
+        
+        return all_assets
+        
     except Exception as e:
         logger.error(f"Error scanning Arma 3 installation: {e}")
         return set()

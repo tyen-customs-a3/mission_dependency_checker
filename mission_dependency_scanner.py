@@ -1,8 +1,9 @@
 import re
 import os
 from typing import Set, Dict
-from database_class import ClassEntry
 import logging
+from database_types import ClassEntry
+from database_sql import ClassDatabase  # Add this import
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +21,19 @@ class MissionDependencyScanner:
         self.missing_classes = set()
         self.found_classes = set()
         
-        # Create set of all known mod classes
-        self.all_mod_classes = {
-            entry.class_name 
-            for entries in class_database.values() 
-            for entry in entries
-        }
+        # Initialize SQL database with proper error handling
+        self.sql_db = ClassDatabase(':memory:')
+        try:
+            entries = [entry for entries in class_database.values() for entry in entries]
+            if entries:
+                self.sql_db.add_class_entries(entries)
+                stats = self.sql_db.get_statistics()
+                logger.info(f"Loaded {stats['total_classes']} classes from {stats['unique_sources']} sources")
+            else:
+                logger.warning("No class entries provided to initialize database")
+        except Exception as e:
+            logger.error(f"Failed to initialize SQL database: {e}")
+            raise
 
         # Common classes to ignore
         self.ignore_classes = {
@@ -191,10 +199,17 @@ class MissionDependencyScanner:
         for class_name in self.class_references:
             if class_name in self.mission_classes:
                 continue
-            if class_name in self.all_mod_classes:
+            
+            # Use SQL query to find class
+            found_entries = self.sql_db.find_class(class_name)
+            if found_entries:
                 self.found_classes.add(class_name)
             else:
                 self.missing_classes.add(class_name)
+                # Find similar classes for improved error reporting
+                similar = self.sql_db.find_similar_classes(class_name, limit=3)
+                if similar:
+                    logger.debug(f"Similar classes for {class_name}: {[c.class_name for c in similar]}")
 
     def print_report(self):
         """Print analysis results"""
@@ -230,3 +245,47 @@ class MissionDependencyScanner:
         print(f"  Missing Classes: {len(self.missing_classes)}")
         print(f"  Found Classes: {len(self.found_classes)}")
         print(f"  Missing Assets: {len(self.missing_assets)}")
+
+    def print_class_hierarchies(self):
+        """Print inheritance trees for all referenced classes"""
+        print("\nClass Inheritance Analysis")
+        print("=" * 50)
+        
+        for class_name in sorted(self.class_references):
+            if class_name in self.found_classes:
+                print(f"\nAnalyzing: {class_name}")
+                print("-" * 20)
+                self.sql_db.print_inheritance_tree(class_name)
+                
+                # Optionally show derived classes
+                derived = self.sql_db.get_derived_classes(class_name)
+                if len(derived) > 1:  # More than just the class itself
+                    print("\nDerived classes:")
+                    self.sql_db.print_inheritance_tree(class_name, show_derived=True)
+
+    def export_class_graphs(self, output_dir: str, format: str = 'json'):
+        """Export inheritance graphs in specified format"""
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Map format to file extension and export function
+        format_map = {
+            'json': ('json', lambda g, f: g.export_json(f)),
+            'graphml': ('graphml', lambda g, f: g.export_graphml(f)),
+            'gexf': ('gexf', lambda g, f: g.export_gexf(f))
+        }
+        
+        if format not in format_map:
+            raise ValueError(f"Unsupported format: {format}")
+        
+        ext, export_func = format_map[format]
+        
+        # Export individual class hierarchies
+        for class_name in sorted(self.class_references):
+            if class_name in self.found_classes:
+                graph = self.sql_db.create_class_graph(class_name, max_depth=3)
+                basename = f"{class_name}_hierarchy.{ext}"
+                export_func(graph, os.path.join(output_dir, basename))
+        
+        # Export complete mission class graph
+        mission_graph = self.sql_db.create_class_graph()
+        export_func(mission_graph, os.path.join(output_dir, f"mission_classes.{ext}"))

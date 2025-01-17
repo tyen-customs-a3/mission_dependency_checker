@@ -1,6 +1,6 @@
 from pathlib import Path
 from database_asset import scan_folder, find_arma3_install, scan_arma3_base
-from database_class import extract_classes_from_cpp, parse_class_hierarchy
+from database_class import parse_class_hierarchy
 from database_class_debug import write_debug_class_dump, write_debug_class_csv
 from report import save_report, print_quick_summary
 from cache_manager import CacheManager
@@ -22,7 +22,7 @@ class ScanTask:
     name: str
     mods_folder: Path
     mission_folder: Path
-    cpp_file_path: Path
+    ini_file_path: Path  # Changed from cpp_file_path
 
 def get_task_hash(task) -> str:
     """Generate a hash for the task based on its configuration"""
@@ -30,23 +30,45 @@ def get_task_hash(task) -> str:
     return hashlib.md5(task_data.encode()).hexdigest()
 
 def initialize_vanilla_assets(cache_mgr: CacheManager) -> Set[str]:
-    """Initialize or load vanilla Arma 3 assets"""
-    # Try to get cached vanilla assets first
+    """Initialize vanilla assets, using cache if available"""
+    # Try to get cached assets first
     vanilla_assets = cache_mgr.get_vanilla_assets()
-    if vanilla_assets:
-        logger.info(f"Loaded {len(vanilla_assets)} cached vanilla assets")
+    if (vanilla_assets is not None):
+        logger.info(f"Loaded {len(vanilla_assets)} vanilla assets from cache")
+        # Debug check for specific assets
+        debug_assets = [
+            'a3/ui_f/data/gui/cfg/communicationmenu/transport_ca.paa',
+            'a3/ui_f/data/igui/cfg/weaponicons/mg_ca.paa'
+        ]
+        for asset in debug_assets:
+            if asset not in vanilla_assets:
+                logger.warning(f"Cached vanilla assets missing: {asset}")
         return vanilla_assets
 
-    # Scan vanilla assets if not cached
-    arma3_path = find_arma3_install()
-    if (arma3_path):
-        logger.info("Scanning Arma 3 installation for vanilla assets...")
-        vanilla_assets = scan_arma3_base(arma3_path, "arma3_base", cache_mgr)
-        cache_mgr.store_vanilla_assets(vanilla_assets)
-        logger.info(f"Cached {len(vanilla_assets)} vanilla assets")
+    # If not cached, scan Arma 3 installation
+    arma_path = find_arma3_install()
+    if not arma_path:
+        logger.error("Could not find Arma 3 installation")
+        return set()
+
+    # Enable debug logging temporarily for asset scanning
+    asset_logger = logging.getLogger('database_asset')
+    original_level = asset_logger.level
+    asset_logger.setLevel(logging.DEBUG)
+
+    try:
+        logger.info("Scanning vanilla Arma 3 assets...")
+        vanilla_assets = scan_arma3_base(arma_path, "vanilla", cache_mgr)
+        
+        # Cache the results for future use
+        if vanilla_assets:
+            cache_mgr.update_vanilla_assets(vanilla_assets, arma_path)
+            logger.info(f"Cached {len(vanilla_assets)} vanilla assets")
+        
         return vanilla_assets
-    
-    return set()
+    finally:
+        # Restore original logging level
+        asset_logger.setLevel(original_level)
 
 def process_scan_task(task: ScanTask, cache_mgr: CacheManager, vanilla_assets: Set[str], logger: logging.Logger) -> bool:
     """Process a single scan task"""
@@ -60,31 +82,21 @@ def process_scan_task(task: ScanTask, cache_mgr: CacheManager, vanilla_assets: S
         logger.setLevel(logging.DEBUG)
         
         # Validate paths exist
-        if not task.cpp_file_path.exists():
-            logger.error(f"Error: Config file not found: {task.cpp_file_path}")
+        if not task.ini_file_path.exists():
+            logger.error(f"Error: INIDBI2 file not found: {task.ini_file_path}")
             return False
         
         class_database = {}
 
-        # Process the cpp file containing class data
-        logger.info(f"\nScanning cpp file: {task.cpp_file_path}")
+        # Parse all entries at once using INIDBI2 parser
+        logger.info(f"\nParsing INIDBI2 file: {task.ini_file_path}")
         try:
-            class_entries_by_category = extract_classes_from_cpp(str(task.cpp_file_path))
-            
-            # Build class database
-            logger.info(f"Building class database for {task.name}...")
-            
-            # Process all entries at once
-            all_entries = parse_class_hierarchy(class_entries_by_category)
-            
-            # Organize by source into a dict of sets
-            class_database = {}
-            for entry in all_entries.values():
-                if entry.source not in class_database:
-                    class_database[entry.source] = set()
-                class_database[entry.source].add(entry)
-            
-            logger.info(f"Total classes processed: {len(all_entries)}")
+            class_database = parse_class_hierarchy(str(task.ini_file_path))
+            if not class_database:
+                logger.error("No classes extracted from INIDBI2 file")
+                return False
+                
+            logger.info(f"Loaded classes from {len(class_database)} sources")
             
         except Exception as e:
             logger.error(f"Failed to extract classes: {e}")
@@ -151,14 +163,14 @@ def main():
             ScanTask(
                 name="pcanext",
                 mods_folder=Path(r"C:\pcanext"),
-                mission_folder=Path(r"C:\pca_missions"),
-                cpp_file_path=Path(__file__).parent / "classes" / "classes_pcanext.cpp"
+                mission_folder=Path(r"C:\pca_missions_quick"),
+                ini_file_path=Path(__file__).parent / "data" / "ConfigExtract_pcanext.ini"
             ),
             # ScanTask(
             #     name="pca",
             #     mods_folder=Path(r"C:\pca"),
             #     mission_folder=Path(r"C:\pca_missions"),
-            #     cpp_file_path=Path(__file__).parent / "classes" / "classes_pca.cpp"
+            #     ini_file_path=Path(__file__).parent / "data" / "ConfigExtract_pca.ini"
             # ),
         ]
 
