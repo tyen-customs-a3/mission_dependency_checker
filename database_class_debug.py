@@ -67,7 +67,7 @@ def write_debug_class_dump(database: Dict[str, Set[ClassEntry]], output_folder: 
     
     logger.info(f"Class database dump written to: {output_file}")
 
-def write_debug_class_csv(database: Dict[str, ClassEntry], output_folder: str, task_name: str) -> None:
+def write_debug_class_csv(database: Dict[str, Set[ClassEntry]], output_folder: str, task_name: str) -> None:
     """Write parsed class database to debug CSV file"""
     output_file = os.path.join(output_folder, "class_database.csv")
     
@@ -75,8 +75,12 @@ def write_debug_class_csv(database: Dict[str, ClassEntry], output_folder: str, t
         writer = csv.writer(f, quoting=csv.QUOTE_ALL, escapechar='\\')
         writer.writerow(['ClassName', 'Source', 'Category', 'Parent'])
         
-        # Write entries directly from the dictionary
-        for entry in sorted(database.values()):
+        # Flatten and sort all entries from all sources
+        all_entries = []
+        for entries in database.values():
+            all_entries.extend(entries)
+        
+        for entry in sorted(all_entries):
             writer.writerow([
                 entry.class_name,
                 entry.source,

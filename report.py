@@ -90,3 +90,64 @@ def print_quick_summary(mission_reports):
                 print(f"  Missing Assets: {len(scanner.missing_assets)}")
                 for asset_path in sorted(scanner.missing_assets):
                     print(f"    - {asset_path}")
+
+def save_comparison_report(comparisons, output_dir="reports", task_name=""):
+    """Save comparison results between two tasks"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    task_folder = os.path.join(output_dir, f"{task_name}_comparison_{timestamp}")
+    
+    if not os.path.exists(task_folder):
+        os.makedirs(task_folder)
+    
+    output_file = os.path.join(task_folder, "comparison_report.txt")
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(f"MISSION COMPARISON REPORT\n")
+        f.write("=" * 50 + "\n")
+        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        for comp in comparisons:
+            f.write(f"\nMission: {comp.mission_name}\n")
+            f.write("=" * (len(comp.mission_name) + 9) + "\n")
+            
+            # Write missing classes comparison
+            f.write(f"\nMissing Classes Comparison:\n")
+            f.write(f"  Common to both tasks:\n")
+            for class_name in sorted(comp.common_missing):
+                f.write(f"    {class_name}\n")
+                
+            f.write(f"\n  Unique to {comp.task1_name}:\n")
+            for class_name in sorted(comp.unique_to_task1):
+                f.write(f"    {class_name}\n")
+                
+            f.write(f"\n  Unique to {comp.task2_name}:\n")
+            for class_name in sorted(comp.unique_to_task2):
+                f.write(f"    {class_name}\n")
+            
+            # Write missing assets comparison
+            f.write(f"\nMissing Assets Comparison:\n")
+            f.write(f"  {comp.task1_name}:\n")
+            for asset in sorted(comp.missing_assets1):
+                f.write(f"    {asset}\n")
+                
+            f.write(f"\n  {comp.task2_name}:\n")
+            for asset in sorted(comp.missing_assets2):
+                f.write(f"    {asset}\n")
+            
+            f.write("\n" + "=" * 50 + "\n")
+    
+    print(f"\nComparison report saved to: {output_file}")
+    return task_folder
+
+def print_comparison_summary(comparisons):
+    """Print a quick summary of the comparison results"""
+    print("\nCOMPARISON SUMMARY")
+    print("=================")
+    
+    for comp in comparisons:
+        print(f"\nMission: {comp.mission_name}")
+        print(f"  Common missing classes: {len(comp.common_missing)}")
+        print(f"  Unique to {comp.task1_name}: {len(comp.unique_to_task1)}")
+        print(f"  Unique to {comp.task2_name}: {len(comp.unique_to_task2)}")
+        print(f"  Missing assets in {comp.task1_name}: {len(comp.missing_assets1)}")
+        print(f"  Missing assets in {comp.task2_name}: {len(comp.missing_assets2)}")

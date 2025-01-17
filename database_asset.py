@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import hashlib
 from multiprocessing import Pool, cpu_count
 from functools import partial
+from cache_manager import CacheManager
 
 logger = logging.getLogger(__name__)
 

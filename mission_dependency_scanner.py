@@ -2,10 +2,12 @@ import re
 import os
 from typing import Set, Dict
 import logging
+from threading import Lock
 from database_types import ClassEntry
 from database_sql import ClassDatabase  # Add this import
 
 logger = logging.getLogger(__name__)
+print_lock = Lock()
 
 class MissionDependencyScanner:
     def __init__(self, class_database: Dict[str, Set[ClassEntry]], 
@@ -26,9 +28,10 @@ class MissionDependencyScanner:
         try:
             entries = [entry for entries in class_database.values() for entry in entries]
             if entries:
-                self.sql_db.add_class_entries(entries)
-                stats = self.sql_db.get_statistics()
-                logger.info(f"Loaded {stats['total_classes']} classes from {stats['unique_sources']} sources")
+                with self.sql_db.get_connection() as conn:  # Use context manager
+                    self.sql_db.add_class_entries(entries)
+                    stats = self.sql_db.get_statistics()
+                    logger.info(f"Loaded {stats['total_classes']} classes from {stats['unique_sources']} sources")
             else:
                 logger.warning("No class entries provided to initialize database")
         except Exception as e:
@@ -47,9 +50,11 @@ class MissionDependencyScanner:
         self.missing_assets = set()
         self.found_assets = set()
         self.all_assets = asset_database
+        self.mission_base_path = None
 
     def scan_mission(self, mission_path: str):
         """Scan entire mission folder"""
+        self.mission_base_path = mission_path
         # First pass: Find mission-defined classes from loadouts
         for root, _, files in os.walk(mission_path):
             for file in files:
@@ -100,7 +105,7 @@ class MissionDependencyScanner:
             # Extract and check assets
             asset_paths = self._extract_asset_paths(content)
             for path in asset_paths:
-                if path in self.all_assets:
+                if self._check_asset_exists(path):
                     self.found_assets.add(path)
                 else:
                     self.missing_assets.add(path)
@@ -194,74 +199,120 @@ class MissionDependencyScanner:
         
         return asset_paths
 
+    def _normalize_path(self, path: str) -> str:
+        """Normalize path for comparison"""
+        return path.lower().replace('\\', '/').strip('/')
+
+    def _check_asset_exists(self, asset_path: str) -> bool:
+        """Check if an asset exists either in mod database or mission folder"""
+        asset_path = self._normalize_path(asset_path)
+        
+        # First check direct match in mod database
+        if asset_path in self.all_assets:
+            return True
+
+        # Check for partial matches in mod database
+        for db_path in self.all_assets:
+            norm_db_path = self._normalize_path(db_path)
+            if asset_path in norm_db_path:
+                return True
+            
+        # Then check if it exists in mission folder
+        if self.mission_base_path:
+            # Try direct path
+            full_path = os.path.join(self.mission_base_path, asset_path)
+            if os.path.exists(full_path):
+                return True
+                
+            # Try finding the file recursively by its relative path components
+            path_parts = asset_path.split('/')
+            for root, _, files in os.walk(self.mission_base_path):
+                if path_parts[-1] in files:
+                    # Check if the path components match in reverse order
+                    current_path = root
+                    match = True
+                    for part in reversed(path_parts[:-1]):
+                        parent = os.path.basename(current_path).lower()
+                        if part != parent:
+                            match = False
+                            break
+                        current_path = os.path.dirname(current_path)
+                    if match:
+                        return True
+                        
+        return False
+
     def _analyze_dependencies(self):
         """Check class references against mission and mod databases"""
-        for class_name in self.class_references:
-            if class_name in self.mission_classes:
-                continue
-            
-            # Use SQL query to find class
-            found_entries = self.sql_db.find_class(class_name)
-            if found_entries:
-                self.found_classes.add(class_name)
-            else:
-                self.missing_classes.add(class_name)
-                # Find similar classes for improved error reporting
-                similar = self.sql_db.find_similar_classes(class_name, limit=3)
-                if similar:
-                    logger.debug(f"Similar classes for {class_name}: {[c.class_name for c in similar]}")
+        with self.sql_db.get_connection() as conn:  # Use context manager
+            for class_name in self.class_references:
+                if class_name in self.mission_classes:
+                    continue
+                
+                # Use SQL query to find class
+                found_entries = self.sql_db.find_class(class_name)
+                if found_entries:
+                    self.found_classes.add(class_name)
+                else:
+                    self.missing_classes.add(class_name)
+                    # Find similar classes for improved error reporting
+                    similar = self.sql_db.find_similar_classes(class_name, limit=3)
+                    if similar:
+                        logger.debug(f"Similar classes for {class_name}: {[c.class_name for c in similar]}")
 
     def print_report(self):
-        """Print analysis results"""
-        print(f"\nMission Analysis: {self.mission_name}")
-        print("=" * 50)
-        
-        print("\nMission-defined Classes:")
-        for class_name in sorted(self.mission_classes):
-            print(f"  {class_name}")
+        """Print analysis results with thread safety"""
+        with print_lock:
+            print(f"\nMission Analysis: {self.mission_name}")
+            print("=" * 50)
             
-        print("\nMissing Classes:")
-        for class_name in sorted(self.missing_classes):
-            print(f"  {class_name}")
-            similar = [c for c in self.all_mod_classes if class_name.lower() in c.lower()][:3]
-            if similar:
-                print("    Similar classes found:")
-                for s in similar:
-                    print(f"    - {s}")
+            print("\nMission-defined Classes:")
+            for class_name in sorted(self.mission_classes):
+                print(f"  {class_name}")
+                
+            print("\nMissing Classes:")
+            for class_name in sorted(self.missing_classes):
+                print(f"  {class_name}")
+                similar = [c for c in self.all_mod_classes if class_name.lower() in c.lower()][:3]
+                if similar:
+                    print("    Similar classes found:")
+                    for s in similar:
+                        print(f"    - {s}")
 
-        print("\nFound Classes:")
-        for class_name in sorted(self.found_classes):
-            for mod_name, entries in self.class_database.items():
-                if any(entry.class_name == class_name for entry in entries):
-                    print(f"  {class_name} [{mod_name}]")
-                    break
+            print("\nFound Classes:")
+            for class_name in sorted(self.found_classes):
+                for mod_name, entries in self.class_database.items():
+                    if any(entry.class_name == class_name for entry in entries):
+                        print(f"  {class_name} [{mod_name}]")
+                        break
 
-        print("\nMissing Assets:")
-        for asset in sorted(self.missing_assets):
-            print(f"  {asset}")
+            print("\nMissing Assets:")
+            for asset in sorted(self.missing_assets):
+                print(f"  {asset}")
 
-        print("\nStatistics:")
-        print(f"  Mission Classes: {len(self.mission_classes)}")
-        print(f"  Missing Classes: {len(self.missing_classes)}")
-        print(f"  Found Classes: {len(self.found_classes)}")
-        print(f"  Missing Assets: {len(self.missing_assets)}")
+            print("\nStatistics:")
+            print(f"  Mission Classes: {len(self.mission_classes)}")
+            print(f"  Missing Classes: {len(self.missing_classes)}")
+            print(f"  Found Classes: {len(self.found_classes)}")
+            print(f"  Missing Assets: {len(self.missing_assets)}")
 
     def print_class_hierarchies(self):
-        """Print inheritance trees for all referenced classes"""
-        print("\nClass Inheritance Analysis")
-        print("=" * 50)
-        
-        for class_name in sorted(self.class_references):
-            if class_name in self.found_classes:
-                print(f"\nAnalyzing: {class_name}")
-                print("-" * 20)
-                self.sql_db.print_inheritance_tree(class_name)
-                
-                # Optionally show derived classes
-                derived = self.sql_db.get_derived_classes(class_name)
-                if len(derived) > 1:  # More than just the class itself
-                    print("\nDerived classes:")
-                    self.sql_db.print_inheritance_tree(class_name, show_derived=True)
+        """Print inheritance trees with thread safety"""
+        with print_lock:
+            print("\nClass Inheritance Analysis")
+            print("=" * 50)
+            
+            for class_name in sorted(self.class_references):
+                if class_name in self.found_classes:
+                    print(f"\nAnalyzing: {class_name}")
+                    print("-" * 20)
+                    self.sql_db.print_inheritance_tree(class_name)
+                    
+                    # Optionally show derived classes
+                    derived = self.sql_db.get_derived_classes(class_name)
+                    if len(derived) > 1:  # More than just the class itself
+                        print("\nDerived classes:")
+                        self.sql_db.print_inheritance_tree(class_name, show_derived=True)
 
     def export_class_graphs(self, output_dir: str, format: str = 'json'):
         """Export inheritance graphs in specified format"""

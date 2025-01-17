@@ -6,3 +6,4 @@ reports/
 temp/
 debug/
 data/
+*.graphml

@@ -3,23 +3,30 @@ import logging
 from typing import Dict, Set, Optional, List, Tuple
 from database_types import ClassEntry
 from contextlib import contextmanager
+from threading import local
 
 logger = logging.getLogger(__name__)
 
 class ClassDatabase:
     def __init__(self, db_path: str = ':memory:'):
         self.db_path = db_path
-        # Store a single connection for in-memory databases
-        if db_path == ':memory:':
-            self._connection = sqlite3.connect(db_path)
-            self._connection.row_factory = sqlite3.Row
-        else:
-            self._connection = None
+        self._local = local()
         self.init_database()
 
     def __del__(self):
-        if self._connection:
-            self._connection.close()
+        if hasattr(self._local, 'connection'):
+            try:
+                self._local.connection.close()
+            except Exception:
+                pass
+
+    @property
+    def _connection(self):
+        if not hasattr(self._local, 'connection'):
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            self._local.connection = conn
+        return self._local.connection
 
     def init_database(self):
         """Initialize the database schema"""
@@ -29,11 +36,18 @@ class ClassDatabase:
                 source TEXT NOT NULL,
                 category TEXT NOT NULL,
                 parent TEXT,
+                inherits_from TEXT,
+                is_simple_object BOOLEAN,
+                num_properties INTEGER,
+                scope INTEGER,
+                model TEXT,
+                display_name TEXT,
                 PRIMARY KEY (class_name, source)
             );
             CREATE INDEX IF NOT EXISTS idx_class_name ON classes(class_name);
             CREATE INDEX IF NOT EXISTS idx_source ON classes(source);
             CREATE INDEX IF NOT EXISTS idx_parent ON classes(parent);
+            CREATE INDEX IF NOT EXISTS idx_inherits ON classes(inherits_from);
         '''
         with self.get_connection() as conn:
             conn.executescript(sql)
@@ -43,17 +57,14 @@ class ClassDatabase:
 
     @contextmanager
     def get_connection(self):
-        """Get database connection - reuse for in-memory, create new for file"""
-        if self._connection:
+        """Get thread-local database connection"""
+        try:
             yield self._connection
-        else:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            try:
-                yield conn
-                conn.commit()
-            finally:
-                conn.close()
+        finally:
+            if self.db_path != ':memory:':
+                if hasattr(self._local, 'connection'):
+                    self._local.connection.close()
+                    delattr(self._local, 'connection')
 
     def add_class_entries(self, entries: List[ClassEntry], batch_size: int = 1000):
         """Efficiently insert multiple class entries"""
@@ -66,19 +77,27 @@ class ClassDatabase:
                     entry.class_name,
                     entry.source,
                     entry.category,
-                    entry.parent
+                    entry.parent,
+                    entry.inherits_from,
+                    entry.is_simple_object,
+                    entry.num_properties,
+                    entry.scope,
+                    entry.model,
+                    entry.display_name
                 ))
                 
                 if len(batch) >= batch_size:
                     cursor.executemany(
-                        'INSERT OR REPLACE INTO classes VALUES (?, ?, ?, ?)',
+                        '''INSERT OR REPLACE INTO classes 
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                         batch
                     )
                     batch = []
             
             if batch:  # Insert any remaining entries
                 cursor.executemany(
-                    'INSERT OR REPLACE INTO classes VALUES (?, ?, ?, ?)',
+                    '''INSERT OR REPLACE INTO classes 
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                     batch
                 )
 
@@ -87,15 +106,24 @@ class ClassDatabase:
         result: Dict[str, Set[ClassEntry]] = {}
         
         with self.get_connection() as conn:
-            # First group by source
-            cursor = conn.execute('SELECT class_name, source, category, parent FROM classes')
+            cursor = conn.execute('''
+                SELECT class_name, source, category, parent, inherits_from,
+                       is_simple_object, num_properties, scope, model, display_name 
+                FROM classes
+            ''')
             
             for row in cursor:
                 entry = ClassEntry(
                     class_name=row[0],
                     source=row[1],
                     category=row[2],
-                    parent=row[3]
+                    parent=row[3],
+                    inherits_from=row[4],
+                    is_simple_object=bool(row[5]),
+                    num_properties=row[6],
+                    scope=row[7],
+                    model=row[8],
+                    display_name=row[9]
                 )
                 
                 if entry.source not in result:

@@ -13,6 +13,8 @@ from datetime import datetime
 from dataclasses import dataclass
 from typing import List, Set
 import hashlib
+from compare import compare_task_results
+from report import save_comparison_report, print_comparison_summary
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
@@ -135,7 +137,7 @@ def process_scan_task(task: ScanTask, cache_mgr: CacheManager, vanilla_assets: S
         
         # Write debug files to the same output folder
         write_debug_class_dump(class_database, output_folder, task.name)
-        write_debug_class_csv(all_entries, output_folder, task.name)
+        write_debug_class_csv(class_database, output_folder, task.name)  # Changed to pass class_database instead of all_entries
         
         return True
 
@@ -163,22 +165,45 @@ def main():
             ScanTask(
                 name="pcanext",
                 mods_folder=Path(r"C:\pcanext"),
-                mission_folder=Path(r"C:\pca_missions_quick"),
+                mission_folder=Path(r"C:\pca_missions"),
                 ini_file_path=Path(__file__).parent / "data" / "ConfigExtract_pcanext.ini"
             ),
-            # ScanTask(
-            #     name="pca",
-            #     mods_folder=Path(r"C:\pca"),
-            #     mission_folder=Path(r"C:\pca_missions"),
-            #     ini_file_path=Path(__file__).parent / "data" / "ConfigExtract_pca.ini"
-            # ),
+            ScanTask(
+                name="pca",
+                mods_folder=Path(r"C:\pca"),
+                mission_folder=Path(r"C:\pca_missions"),
+                ini_file_path=Path(__file__).parent / "data" / "ConfigExtract_pca.ini"
+            ),
         ]
 
+        # Store task results for comparison
+        task_results = {}
+        
         for task in scan_tasks:
             logger.info(f"\nProcessing scan task: {task.name}")
-            if not process_scan_task(task, cache_mgr, vanilla_assets, logger):
+            mission_reports = []
+            if process_scan_task(task, cache_mgr, vanilla_assets, logger):
+                task_results[task.name] = mission_reports
+            else:
                 logger.error(f"Failed to process task: {task.name}")
-                
+        
+        # Compare results if we have multiple tasks
+        if len(task_results) >= 2:
+            task_names = list(task_results.keys())
+            for i in range(len(task_names) - 1):
+                for j in range(i + 1, len(task_names)):
+                    task1_name = task_names[i]
+                    task2_name = task_names[j]
+                    
+                    logger.info(f"\nComparing results: {task1_name} vs {task2_name}")
+                    comparison_results = compare_task_results(
+                        task1_name, task_results[task1_name],
+                        task2_name, task_results[task2_name]
+                    )
+                    
+                    print_comparison_summary(comparison_results)
+                    save_comparison_report(comparison_results, task_name=f"{task1_name}_vs_{task2_name}")
+        
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         traceback.print_exc()
