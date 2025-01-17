@@ -4,7 +4,7 @@ import re
 import logging
 import sqlite3
 from typing import Dict, Set, Optional, List, Union, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from datetime import datetime
@@ -20,18 +20,24 @@ class ClassEntry:
     parent: Optional[str] = None
     
     def __hash__(self):
-        return hash((self.class_name, self.source, self.category))
+        return hash((self.class_name, self.source, self.category, self.parent))
     
+    def __lt__(self, other):
+        if not isinstance(other, ClassEntry):
+            return NotImplemented
+        return (self.source, self.class_name) < (other.source, other.class_name)
+
     def __eq__(self, other):
         if not isinstance(other, ClassEntry):
-            return False
-        return (self.class_name == self.class_name and 
-                self.source == self.source and 
-                self.category == self.category)
+            return NotImplemented
+        return (self.class_name == other.class_name and 
+                self.source == other.source and 
+                self.category == other.category and 
+                self.parent == other.parent)
 
-def parse_class_hierarchy(data: Union[str, List[dict], dict]) -> Dict[str, ClassEntry]:
+def parse_class_hierarchy(data: Union[str, List[dict], dict]) -> Dict[str, ClassEntry]:  # Changed return type
     """Parse class data into ClassEntry objects"""
-    classes = {}
+    classes: Dict[str, ClassEntry] = {}  # Changed to store ClassEntry directly
     entry_count = 0
     dropped_count = 0
     
@@ -145,7 +151,14 @@ def parse_class_hierarchy(data: Union[str, List[dict], dict]) -> Dict[str, Class
     return classes
 
 def parse_csv_line(line: str) -> Optional[Dict[str, str]]:
-    """Parse a CSV line into a dictionary"""
+    """Parse a CSV line into a dictionary
+    
+    Format examples:
+    "4Rnd_Titan_long_missiles","A3","CfgMagazines","4Rnd_GAA_missiles"
+    "ACE_2Rnd_12Gauge_Pellets_No3_Buck","@ace","CfgMagazines","ACE_2Rnd_12Gauge_Pellets_No0_Buck"
+    "rhs_mag_M397_HET","@rhsusaf","CfgMagazines",""
+    "rhs_6b23","@rhsafrf","CfgWeapons"",",""
+    """
     try:
         # Clean up the line
         line = line.strip().strip('"')
@@ -157,10 +170,13 @@ def parse_csv_line(line: str) -> Optional[Dict[str, str]]:
         
         # Require at least class name, source, and category
         if len(parts) >= 3:
+            # Clean up category field - remove any trailing quotes and commas
+            category = parts[2].rstrip('",')
+            
             return {
                 'class': parts[0],
                 'source': parts[1],
-                'category': parts[2],
+                'category': category,
                 'parent': parts[3] if len(parts) > 3 and parts[3] else None
             }
     except Exception as e:
@@ -168,7 +184,21 @@ def parse_csv_line(line: str) -> Optional[Dict[str, str]]:
     return None
 
 def parse_cpp_value(value: str) -> List[str]:
-    """Parse the specific cpp value format into individual CSV lines"""
+    """Parse the specific cpp value format into individual CSV lines
+    
+    Example CPP format:
+    name="extractedcsv_CfgMagazines_1";
+    value="\"ClassName\",\"Source\",\"Category\",\"Parent\"\n
+    \"4Rnd_Titan_long_missiles\",\"A3\",\"CfgMagazines\",\"4Rnd_GAA_missiles\"\n
+    \"ACE_2Rnd_12Gauge_Pellets_No3_Buck\",\"@ace\",\"CfgMagazines\",\"ACE_2Rnd_12Gauge_Pellets_No0_Buck\"";
+    
+    Format spec:
+    - Each chunk starts with name="extractedcsv_CATEGORY_NUMBER";
+    - value="..." contains CSV data
+    - CSV data has header line
+    - Lines separated by literal '\n'
+    - Fields are double-quoted and escaped
+    """
     # Clean up the input string
     value = value.strip().strip('"')
     
@@ -183,7 +213,30 @@ def parse_cpp_value(value: str) -> List[str]:
     ]
 
 def extract_classes_from_cpp(file_path: str) -> Dict[str, List[dict]]:
-    """Extract CSV config data from .cpp file, organized by category"""
+    """Extract CSV config data from .cpp file, organized by category
+    
+    File structure example:
+    class CfgPatches {
+        class MyMod {
+            name="extractedcsv_CfgMagazines_count";
+            value="27";
+        };
+        class Data1 {
+            name="extractedcsv_CfgMagazines_1";
+            value="...CSV data...";
+        };
+        class Data2 {
+            name="extractedcsv_CfgMagazines_2";
+            value="...CSV data...";
+        };
+    };
+    
+    Structure spec:
+    - Categories defined by extractedcsv_CATEGORY
+    - Count stored in extractedcsv_CATEGORY_count
+    - Data chunks numbered 1 to count
+    - Single chunk without number if count missing
+    """
     config_data = {}
     
     with open(file_path, 'r', encoding='utf-8') as f:

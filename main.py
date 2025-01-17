@@ -1,7 +1,7 @@
 from pathlib import Path
 from database_asset import scan_folder
 from database_class import extract_classes_from_cpp, parse_class_hierarchy
-from database_class_debug import write_debug_class_dump
+from database_class_debug import write_debug_class_dump, write_debug_class_csv
 from report import save_report, print_quick_summary
 from cache_manager import CacheManager
 from scanner import scan_mission_folder
@@ -35,25 +35,14 @@ def process_scan_task(task: ScanTask, cache_mgr: CacheManager, logger: logging.L
 
         logger.info(f"Processing task for {task_name}...")
         logger.info(f"Scanning mods folder: {task.mods_folder}")
-        
-        # Scan mods folder for assets with caching support
-        asset_database = scan_folder(
-            str(task.mods_folder),
-            task_name,
-            task_hash,
-            cache_mgr
-        )
-        
-        # Set debug logging temporarily
         logger.setLevel(logging.DEBUG)
         
-        class_database = {}
-        asset_database = set()
-
         # Validate paths exist
         if not task.cpp_file_path.exists():
             logger.error(f"Error: Config file not found: {task.cpp_file_path}")
             return False
+        
+        class_database = {}
 
         # Process the cpp file containing class data
         logger.info(f"\nScanning cpp file: {task.cpp_file_path}")
@@ -62,16 +51,16 @@ def process_scan_task(task: ScanTask, cache_mgr: CacheManager, logger: logging.L
             
             # Build class database
             logger.info(f"Building class database for {task.name}...")
-            class_database = {}
             
             # Process all entries at once
             all_entries = parse_class_hierarchy(class_entries_by_category)
             
-            # Organize by source
-            for class_entry in all_entries.values():
-                if class_entry.source not in class_database:
-                    class_database[class_entry.source] = set()
-                class_database[class_entry.source].add(class_entry)
+            # Organize by source into a dict of sets
+            class_database = {}
+            for entry in all_entries.values():
+                if entry.source not in class_database:
+                    class_database[entry.source] = set()
+                class_database[entry.source].add(entry)
             
             logger.info(f"Total classes processed: {len(all_entries)}")
             
@@ -80,16 +69,21 @@ def process_scan_task(task: ScanTask, cache_mgr: CacheManager, logger: logging.L
             traceback.print_exc()
             return False
 
-        # Write debug dump of class database
+        # Write debug files to debug directory
         write_debug_class_dump(class_database, "debug", task.name)
-
-        # Validate and scan mods folder
-        if not task.mods_folder.exists():
-            logger.error(f"Error: Mods folder does not exist: {task.mods_folder}")
-            return False
+        write_debug_class_csv(all_entries, "debug", task.name)
+        
+        logger.info(f"Class database built for {task.name}")
 
         logger.info(f"\nScanning mods folder: {task.mods_folder}")
-        asset_database = scan_folder(str(task.mods_folder))
+
+        # Scan mods folder for assets with caching support
+        asset_database = scan_folder(
+            str(task.mods_folder),
+            task_name,
+            task_hash,
+            cache_mgr
+        )
 
         # Validate and scan missions
         if not task.mission_folder.exists():
@@ -129,12 +123,12 @@ def main():
                 mission_folder=Path(r"C:\pca_missions"),
                 cpp_file_path=Path(__file__).parent / "classes" / "classes_pcanext.cpp"
             ),
-            ScanTask(
-                name="pca",
-                mods_folder=Path(r"C:\pca"),
-                mission_folder=Path(r"C:\pca_missions"),
-                cpp_file_path=Path(__file__).parent / "classes" / "classes_pca.cpp"
-            ),
+            # ScanTask(
+            #     name="pca",
+            #     mods_folder=Path(r"C:\pca"),
+            #     mission_folder=Path(r"C:\pca_missions"),
+            #     cpp_file_path=Path(__file__).parent / "classes" / "classes_pca.cpp"
+            # ),
         ]
 
         # Process each task

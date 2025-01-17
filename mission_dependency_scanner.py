@@ -115,10 +115,6 @@ class MissionDependencyScanner:
             for entry in entries:
                 if entry.parent:
                     self.parent_map[entry.class_name] = entry.parent
-                    # Also add the full path to class_paths
-                    full_path = entry.get_full_path()
-                    if full_path:
-                        self.class_paths.add(full_path)
         
         # Build complete inheritance tree
         self._build_inheritance_tree()
@@ -466,19 +462,11 @@ class MissionDependencyScanner:
 
     def find_class_in_database(self, class_name: str) -> Optional[ClassEntry]:
         """Search for a class by direct name match"""
-        # First check if it's in any mod's classes
+        # Check all entries in all mods
         for entries in self.class_database.values():
             for entry in entries:
                 if entry.class_name == class_name:
                     return entry
-                    
-        # If not found, check case-insensitive
-        class_name_lower = class_name.lower()
-        for entries in self.class_database.values():
-            for entry in entries:
-                if entry.class_name.lower() == class_name_lower:
-                    return entry
-        
         return None
 
     def scan_file(self, file_path: str) -> Tuple[Set[str], Set[str]]:
@@ -542,21 +530,23 @@ class MissionDependencyScanner:
             
         print(f"\nFound Classes: {len(self.found_classes)}")
         for class_name in sorted(self.found_classes):
-            # Find the full entry in the database
             entry = self.find_class_in_database(class_name)
             if entry:
-                print(f"  {class_name} [{entry.source}] -> {entry.get_full_path()}")
+                print(f"  {class_name} [{entry.source}]")
             else:
                 print(f"  {class_name}")
         
         print(f"\nMissing Classes: {len(self.missing_classes)}")
         for class_name in sorted(self.missing_classes):
             print(f"  {class_name}")
-            # Try to find similar classes for debugging
-            similar = [path for path in self.class_paths if class_name.lower() in path.lower()]
+            # Try to find similar classes
+            similar = [
+                other for other in self.all_classes 
+                if class_name.lower() in other.lower()
+            ][:3]  # Show up to 3 similar classes
             if similar:
                 print("    Similar classes found:")
-                for s in sorted(similar)[:3]:  # Show up to 3 similar classes
+                for s in similar:
                     print(f"    - {s}")
         
         print(f"\nMissing Assets: {len(self.missing_assets)}")

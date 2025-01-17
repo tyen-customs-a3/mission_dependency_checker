@@ -7,13 +7,21 @@ from database_class import ClassEntry
 
 logger = logging.getLogger(__name__)
 
+# Store timestamp per task to reuse across function calls
+_task_folders = {}
+
+def _get_debug_folder(output_dir: str, task_name: str) -> str:
+    """Create and return debug folder for task, ensuring same timestamp is used"""
+    if task_name not in _task_folders:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _task_folders[task_name] = os.path.join(output_dir, f"{task_name}_{timestamp}")
+        os.makedirs(_task_folders[task_name], exist_ok=True)
+    return _task_folders[task_name]
+
 def write_debug_class_dump(database: Dict[str, Set[ClassEntry]], output_dir: str, task_name: str) -> None:
     """Write a human-readable dump of the class database in a table format"""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = os.path.join(output_dir, f"class_dump_{task_name}_{timestamp}.txt")
+    debug_folder = _get_debug_folder(output_dir, task_name)
+    output_file = os.path.join(debug_folder, "class_dump.txt")
     
     # Define column widths
     col_widths = {
@@ -37,17 +45,17 @@ def write_debug_class_dump(database: Dict[str, Set[ClassEntry]], output_dir: str
         f.write(header)
         f.write("-" * (sum(col_widths.values()) + 5) + "\n")
         
-        # Write data rows
+        # Write data rows - collect all entries
         all_entries = []
-        for source, entries in database.items():
-            all_entries.extend((entry, source) for entry in entries)
+        for entries in database.values():
+            all_entries.extend(entries)  # Sets are iterable
         
-        # Sort by source and then class name
-        for entry, source in sorted(all_entries, key=lambda x: (x[1], x[0].class_name)):
+        # Sort entries by source and class name using ClassEntry's comparison methods
+        for entry in sorted(all_entries):
             # Truncate long strings and add ellipsis if needed
             class_name = entry.class_name[:col_widths['class']-3] + "..." if len(entry.class_name) > col_widths['class'] else entry.class_name
             category = entry.category[:col_widths['category']-3] + "..." if len(entry.category) > col_widths['category'] else entry.category
-            source_str = source[:col_widths['source']-3] + "..." if len(source) > col_widths['source'] else source
+            source_str = entry.source[:col_widths['source']-3] + "..." if len(entry.source) > col_widths['source'] else entry.source
             parent = (entry.parent or "")[:col_widths['parent']-3] + "..." if entry.parent and len(entry.parent) > col_widths['parent'] else (entry.parent or "")
             
             line = (
@@ -60,26 +68,22 @@ def write_debug_class_dump(database: Dict[str, Set[ClassEntry]], output_dir: str
     
     logger.info(f"Class database dump written to: {output_file}")
 
-def write_debug_csv(data: List[dict], source_file: str, category: str):
-    """Write parsed data to debug CSV file"""
-    debug_dir = "debug"
-    if not os.path.exists(debug_dir):
-        os.makedirs(debug_dir)
-        
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = os.path.join(debug_dir, f"parsed_classes_{category}_{timestamp}.csv")
+def write_debug_class_csv(database: Dict[str, ClassEntry], output_dir: str, task_name: str) -> None:
+    """Write parsed class database to debug CSV file"""
+    debug_folder = _get_debug_folder(output_dir, task_name)
+    output_file = os.path.join(debug_folder, "class_database.csv")
     
-    with open(filename, 'w', newline='', encoding='utf-8') as f:
+    with open(output_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f, quoting=csv.QUOTE_ALL, escapechar='\\')
         writer.writerow(['ClassName', 'Source', 'Category', 'Parent'])
-        for entry in data:
-            if not all(key in entry for key in ['class', 'source', 'category']):
-                logger.warning(f"Skipping invalid entry: {entry}")
-                continue
+        
+        # Write entries directly from the dictionary
+        for entry in sorted(database.values()):
             writer.writerow([
-                entry['class'],
-                entry['source'],
-                entry['category'],
-                entry.get('parent', '')  # parent is optional
+                entry.class_name,
+                entry.source,
+                entry.category,
+                entry.parent or ''  # Handle None case
             ])
-    logger.info(f"Debug CSV written to: {filename}")
+    
+    logger.info(f"Class database CSV written to: {output_file}")

@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Dict, Set, Optional, List, Tuple
 from dataclasses import dataclass
 import hashlib
+from multiprocessing import Pool, cpu_count
+from functools import partial
 
 logger = logging.getLogger(__name__)
 
@@ -94,17 +96,40 @@ def process_pbo(pbo_path: str, task_name: str, cache_mgr) -> Tuple[Optional[str]
         logger.error(f"Error processing PBO {pbo_path}: {e}")
         return None, set()
 
-def scan_folder(folder_path: str, task_name: str, task_hash: str, cache_mgr) -> Set[str]:
-    """Scan folder for PBO files and process them"""
+def _process_pbo_worker(args: Tuple[str, str, object]) -> Tuple[str, Optional[str], Set[str]]:
+    """Worker function for parallel PBO processing"""
+    pbo_path, task_name, cache_mgr = args
+    prefix, assets = process_pbo(pbo_path, task_name, cache_mgr)
+    return pbo_path, prefix, assets
+
+def scan_folder(folder_path: str, task_name: str, task_hash: str, cache_mgr, max_workers: int = None) -> Set[str]:
+    """Scan folder for PBO files and process them in parallel"""
     # Check if we need to initialize/reset cache
     if not cache_mgr.check_asset_cache_valid(task_name, task_hash):
         cache_mgr.initialize_asset_cache(task_name, task_hash)
     
-    assets = set()
+    # Collect all PBO files first
+    pbo_files = []
     for root, _, files in os.walk(folder_path):
         for file in files:
             if file.lower().endswith('.pbo'):
-                pbo_path = os.path.join(root, file)
-                _, pbo_assets = process_pbo(pbo_path, task_name, cache_mgr)
-                assets.update(pbo_assets)
+                pbo_files.append(os.path.join(root, file))
+    
+    if not pbo_files:
+        return set()
+    
+    # Set number of workers
+    if max_workers is None:
+        max_workers = max(1, cpu_count() - 1)
+    
+    # Process PBOs in parallel
+    assets = set()
+    with Pool(max_workers) as pool:
+        worker_args = [(pbo, task_name, cache_mgr) for pbo in pbo_files]
+        results = pool.map(_process_pbo_worker, worker_args)
+        
+        # Collect results
+        for _, _, pbo_assets in results:
+            assets.update(pbo_assets)
+    
     return assets
