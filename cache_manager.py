@@ -17,7 +17,9 @@ class CacheManager:
         self.db_path = self.cache_dir / "cache.db"
         self.temp_dir = Path(__file__).parent / "temp"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.shared_asset_db = self.cache_dir / "shared_assets.db"
         self._init_db()
+        self._init_shared_asset_db()
     
     def _init_db(self):
         """Initialize SQLite database schema"""
@@ -36,6 +38,37 @@ class CacheManager:
             """)
             conn.commit()
     
+    def _init_shared_asset_db(self):
+        """Initialize shared asset database for vanilla Arma 3"""
+        with sqlite3.connect(self.shared_asset_db) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS vanilla_assets (
+                    asset_path TEXT PRIMARY KEY,
+                    scan_time INTEGER
+                )
+            """)
+            conn.commit()
+    
+    def store_vanilla_assets(self, assets: Set[str]) -> None:
+        """Store vanilla Arma 3 assets in shared database"""
+        current_time = int(os.path.getmtime(__file__))
+        with sqlite3.connect(self.shared_asset_db) as conn:
+            conn.execute("DELETE FROM vanilla_assets")  # Clear existing
+            conn.executemany(
+                "INSERT INTO vanilla_assets (asset_path, scan_time) VALUES (?, ?)",
+                [(asset, current_time) for asset in assets]
+            )
+            conn.commit()
+    
+    def get_vanilla_assets(self) -> Set[str]:
+        """Retrieve vanilla Arma 3 assets from shared database"""
+        try:
+            with sqlite3.connect(self.shared_asset_db) as conn:
+                cursor = conn.execute("SELECT asset_path FROM vanilla_assets")
+                return {row[0] for row in cursor.fetchall()}
+        except sqlite3.Error:
+            return set()
+
     def get_asset_db_path(self, task_name: str) -> Path:
         """Get asset cache database path for task"""
         return self.temp_dir / f"asset_cache_{task_name}.db"

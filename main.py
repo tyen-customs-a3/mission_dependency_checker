@@ -1,5 +1,5 @@
 from pathlib import Path
-from database_asset import scan_folder
+from database_asset import scan_folder, find_arma3_install, scan_arma3_base
 from database_class import extract_classes_from_cpp, parse_class_hierarchy
 from database_class_debug import write_debug_class_dump, write_debug_class_csv
 from report import save_report, print_quick_summary
@@ -11,8 +11,11 @@ import sys
 import os
 from datetime import datetime
 from dataclasses import dataclass
-from typing import List
+from typing import List, Set
 import hashlib
+
+# Get logger for this module
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ScanTask:
@@ -26,7 +29,26 @@ def get_task_hash(task) -> str:
     task_data = f"{task.mods_folder}_{task.mission_folder}"
     return hashlib.md5(task_data.encode()).hexdigest()
 
-def process_scan_task(task: ScanTask, cache_mgr: CacheManager, logger: logging.Logger) -> bool:
+def initialize_vanilla_assets(cache_mgr: CacheManager) -> Set[str]:
+    """Initialize or load vanilla Arma 3 assets"""
+    # Try to get cached vanilla assets first
+    vanilla_assets = cache_mgr.get_vanilla_assets()
+    if vanilla_assets:
+        logger.info(f"Loaded {len(vanilla_assets)} cached vanilla assets")
+        return vanilla_assets
+
+    # Scan vanilla assets if not cached
+    arma3_path = find_arma3_install()
+    if (arma3_path):
+        logger.info("Scanning Arma 3 installation for vanilla assets...")
+        vanilla_assets = scan_arma3_base(arma3_path, "arma3_base", cache_mgr)
+        cache_mgr.store_vanilla_assets(vanilla_assets)
+        logger.info(f"Cached {len(vanilla_assets)} vanilla assets")
+        return vanilla_assets
+    
+    return set()
+
+def process_scan_task(task: ScanTask, cache_mgr: CacheManager, vanilla_assets: Set[str], logger: logging.Logger) -> bool:
     """Process a single scan task"""
     try:
         # Generate task name and hash for caching
@@ -73,13 +95,19 @@ def process_scan_task(task: ScanTask, cache_mgr: CacheManager, logger: logging.L
 
         logger.info(f"\nScanning mods folder: {task.mods_folder}")
 
-        # Scan mods folder for assets with caching support
-        asset_database = scan_folder(
+        # Start with vanilla assets and add mod assets
+        asset_database = vanilla_assets.copy()
+        logger.info(f"Starting with {len(asset_database)} vanilla assets")
+
+        # Scan mods folder for additional assets
+        mod_assets = scan_folder(
             str(task.mods_folder),
             task_name,
             task_hash,
             cache_mgr
         )
+        asset_database.update(mod_assets)
+        logger.info(f"Added {len(mod_assets)} mod assets, total: {len(asset_database)}")
 
         # Validate and scan missions
         if not task.mission_folder.exists():
@@ -113,8 +141,10 @@ def main():
         logger = logging.getLogger(__name__)
         logger.info("Starting mission scanner...")
 
-        # Initialize cache manager
+        # Initialize cache manager and load vanilla assets once
         cache_mgr = CacheManager()
+        vanilla_assets = initialize_vanilla_assets(cache_mgr)
+        logger.info(f"Initialized with {len(vanilla_assets)} vanilla Arma 3 assets")
         
         # Define scan tasks
         scan_tasks = [
@@ -132,10 +162,9 @@ def main():
             # ),
         ]
 
-        # Process each task
         for task in scan_tasks:
             logger.info(f"\nProcessing scan task: {task.name}")
-            if not process_scan_task(task, cache_mgr, logger):
+            if not process_scan_task(task, cache_mgr, vanilla_assets, logger):
                 logger.error(f"Failed to process task: {task.name}")
                 
     except Exception as e:

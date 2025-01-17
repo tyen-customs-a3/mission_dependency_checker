@@ -2,6 +2,7 @@ import os
 import logging
 from typing import List
 from mission_dependency_scanner import MissionDependencyScanner
+from database_asset import find_arma3_install, scan_arma3_base
 
 logger = logging.getLogger(__name__)
 

@@ -133,3 +133,29 @@ def scan_folder(folder_path: str, task_name: str, task_hash: str, cache_mgr, max
             assets.update(pbo_assets)
     
     return assets
+
+def find_arma3_install() -> Optional[str]:
+    """Find Arma 3 installation directory"""
+    common_paths = [
+        r"C:\Program Files (x86)\Steam\steamapps\common\Arma 3",
+        r"C:\Program Files\Steam\steamapps\common\Arma 3",
+        # Add more common paths if needed
+    ]
+    
+    for path in common_paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+def scan_arma3_base(arma_path: str, task_name: str, cache_mgr) -> Set[str]:
+    """Recursively scan entire Arma 3 installation for assets"""
+    logger.info("Recursively scanning Arma 3 installation for assets...")
+    
+    task_hash = hashlib.md5(arma_path.encode()).hexdigest()
+    try:
+        assets = scan_folder(arma_path, f"{task_name}_base", task_hash, cache_mgr)
+        logger.info(f"Found {len(assets)} total assets in Arma 3 installation")
+        return assets
+    except Exception as e:
+        logger.error(f"Error scanning Arma 3 installation: {e}")
+        return set()
