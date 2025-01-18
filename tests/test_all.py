@@ -3,7 +3,8 @@ from pathlib import Path
 import tempfile
 import shutil
 from src.core.scanner import AssetScanner
-from src.core.parser import ClassParser, InidbiParser
+from src.core.parser_class import ClassParser
+from src.core.parser_ini import InidbiParser
 from src.core.database import ClassDatabase
 from src.core.models import ClassDef, Asset
 
@@ -45,11 +46,11 @@ def sample_class_file(temp_dir):
 
 @pytest.fixture
 def sample_inidbi_file(temp_dir):
-    """Create sample INIDBI2 format file"""
+    """Create sample INIDBI2 sformat file"""
     content = """
     [CategoryData_Vehicles]
-    1=Car,vanilla,vehicles,Vehicle,,true,5,2,"a3\car.p3d"
-    2=Truck,mod_x,vehicles,Car,,true,7,2,"x\truck.p3d"
+    1=Car,vanilla,vehicles,Vehicle,,true,5,2,"a3/car.p3d"
+    2=Truck,mod_x,vehicles,Car,,true,7,2,"x/truck.p3d"
     """
     file_path = temp_dir / "vehicles.ini"
     file_path.write_text(content)

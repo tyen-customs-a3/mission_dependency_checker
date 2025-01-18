@@ -6,7 +6,8 @@ import logging
 import traceback  # Add this import
 from .cache import CacheManager
 from .scanner import AssetScanner
-from .parser import ClassParser, InidbiParser  # Add InidbiParser
+from .parser_class import ClassParser
+from .parser_ini import InidbiParser
 from .models import Asset, ClassDef
 from .database import ClassDatabase
 from collections import defaultdict
@@ -178,7 +179,8 @@ class MissionValidator:
                                 warnings.append(f"Parent class '{cls.parent}' for '{cls.name}' not found in database")
 
                 except Exception as e:
-                    logger.error(f"Error parsing {config}: {e}")
+                    logger.error(f"Error parsing file {config}: {e}")
+                    warnings.append(f"Failed to parse {config}: {str(e)}")
 
             # Process validation results
             non_sqf_assets = {a for a in assets if not str(a.path).lower().endswith('.sqf')}
@@ -494,4 +496,3 @@ class MissionValidator:
 
     def _should_ignore_class(self, class_name: str) -> bool:
         """Case-insensitive pattern matching"""
-        return any(pattern.match(class_name.lower()) for pattern in self._ignored_regexes)

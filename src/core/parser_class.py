@@ -4,9 +4,9 @@ from collections import defaultdict
 import re
 import csv
 import logging
-from datetime import datetime
 from .models import ClassDef, InidbiClass
 from .base_parser import BaseParser
+from .parser_mission import MissionParser
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,10 @@ class ClassParser(BaseParser):
             content = path.read_text(encoding='utf-8')
             source = path.stem
             
+            if not self._verify_balanced_braces(content, path):
+                logger.error(f"Failed to parse {path} due to unbalanced braces")
+                raise ValueError(f"File {path} has unbalanced braces")
+            
             # Only use mission parsing if enabled and file matches mission patterns
             if treat_as_mission and self.mission_parser.is_mission_file(path):
                 classes.update(self.mission_parser.parse_file(path))
@@ -99,7 +103,8 @@ class ClassParser(BaseParser):
                     self.validate_inheritance(class_def, available)
                 
         except Exception as e:
-            logger.error(f"Failed to parse {path}: {e}")
+            logger.error(f"Failed to parse file {path}: {e}")
+            raise
             
         return classes
 
@@ -114,7 +119,7 @@ class ClassParser(BaseParser):
         classes = set()
         
         # First verify brace balance
-        if not self._verify_balanced_braces(content):
+        if not self._verify_balanced_braces(content, source):
             logger.error(f"Failed to parse {source} due to unbalanced braces")
             # Try to recover by finding complete class definitions
             return self._parse_with_recovery(content, source)
@@ -211,7 +216,7 @@ class ClassParser(BaseParser):
                         class_content = '\n'.join(current_class)
                         if match := self._class_pattern.search(class_content):
                             name, parent, body = match.groups()
-                            if self._verify_balanced_braces(body):
+                            if self._verify_balanced_braces(body, source):
                                 classes.add(ClassDef(
                                     name=name.strip(),
                                     parent=parent.strip() if parent else None,
@@ -226,7 +231,7 @@ class ClassParser(BaseParser):
                 
         return classes
 
-    def _verify_balanced_braces(self, content: str) -> bool:
+    def _verify_balanced_braces(self, content: str, file_path: Path) -> bool:
         """Comprehensive brace balance checker with error reporting"""
         stack = []
         in_string = False
@@ -275,18 +280,18 @@ class ClassParser(BaseParser):
                     stack.append((char, line_num, col_num))
                 elif char in '})':
                     if not stack:
-                        logger.error(f"Unexpected closing '{char}' at line {line_num}, column {col_num}")
+                        logger.error(f"File {file_path}: Unexpected closing '{char}' at line {line_num}, column {col_num}")
                         return False
                     opening, open_line, open_col = stack.pop()
                     if (opening == '{' and char != '}') or (opening == '(' and char != ')'):
-                        msg = f"Mismatched braces: found '{char}' at line {line_num}, column {col_num} "
+                        msg = f"File {file_path}: Mismatched braces: found '{char}' at line {line_num}, column {col_num} "
                         msg += f"for opening '{opening}' at line {open_line}, column {open_col}"
                         logger.error(msg)
                         return False
 
         if stack:
             opening, line_num, col_num = stack[-1]
-            logger.error(f"Unclosed '{opening}' from line {line_num}, column {col_num}")
+            logger.error(f"File {file_path}: Unclosed '{opening}' from line {line_num}, column {col_num}")
             return False
             
         return True
@@ -689,327 +694,3 @@ class ClassParser(BaseParser):
         
         # Clean up items - remove trailing commas and whitespace
         return [item.rstrip(',').strip() for item in items if item.rstrip(',').strip()]
-
-class InidbiParser(BaseParser):
-    def __init__(self):
-        super().__init__()
-        self._default_headers = [
-            "ClassName", "Source", "Category", "Parent",
-            "InheritsFrom", "IsSimpleObject", "NumProperties", 
-            "Scope", "Model", "DisplayName"
-        ]
-        self._sources = set()
-        self._class_lookup: Dict[str, ClassDef] = {}
-
-    def parse_file(self, path: Path) -> Dict[str, Set[ClassDef]]:
-        """Parse INIDBI format with proper quote handling"""
-        try:
-            classes_by_source = defaultdict(set)
-            self._class_lookup.clear()
-            self._sources.clear()
-            
-            current_category = None
-            header_fields = self._default_headers
-            
-            lines = path.read_text(encoding='utf-8', errors='ignore').splitlines()
-            
-            for line in lines:
-                line = line.strip()
-                if not line or line.startswith(';'):
-                    continue
-
-                # Handle category headers
-                if line.startswith('[CategoryData_'):
-                    current_category = line[13:-1]
-                    continue
-
-                # Handle header line
-                if line.startswith('header='):
-                    header_line = line[7:].strip('"')
-                    header_fields = next(csv.reader([header_line]))
-                    header_fields = [f.strip() for f in header_fields]
-                    continue
-
-                # Handle data lines
-                if current_category and '=' in line:
-                    if line.startswith('header='):
-                        continue
-                        
-                    try:
-                        idx, data = line.split('=', 1)
-                        data = data.strip().strip('"')
-                        fields = next(csv.reader([data]))
-                        
-                        if class_def := self._create_class(fields, current_category, header_fields):
-                            source = class_def.source
-                            classes_by_source[source].add(class_def)
-                            self._sources.add(source)
-                            self._class_lookup[class_def.name] = class_def
-                            
-                    except Exception as e:
-                        logger.debug(f"Skipping malformed line: {line} - {e}")
-                        continue
-
-            logger.info(f"Parsed {sum(len(classes) for classes in classes_by_source.values())} "
-                       f"total classes from {len(classes_by_source)} sources")
-                       
-            return dict(classes_by_source)
-            
-        except Exception as e:
-            logger.error(f"Failed to parse INIDBI file {path}: {e}")
-            return {}
-
-    def _create_class(self, fields: List[str], category: str, headers: List[str]) -> Optional[ClassDef]:
-        """Fixed class creation logic"""
-        try:
-            # Ensure we have minimum required fields
-            if len(fields) < 3:  # Need at least classname, source, category
-                return None
-                
-            # Map fields to headers, handling any missing fields
-            data = {}
-            for i, header in enumerate(headers):
-                if i < len(fields):
-                    data[header] = fields[i].strip()
-                else:
-                    data[header] = ""
-            
-            name = data.get("ClassName", "").strip()
-            if not name:  # Skip if no class name
-                return None
-                
-            source = data.get("Source", "unknown").strip()
-            parent = data.get("Parent", "").strip() or None
-            
-            # Handle empty or invalid fields gracefully
-            try:
-                num_properties = int(data.get("NumProperties", 0))
-            except ValueError:
-                num_properties = 0
-
-            try:
-                scope = int(data.get("Scope", 0))
-            except ValueError:
-                scope = 0
-
-            meta = InidbiClass(
-                category=category,
-                source_mod=source,
-                properties=data,  # Store all fields in properties
-                inherits_from=data.get("InheritsFrom", "").strip() or None,
-                is_simple_object=data.get("IsSimpleObject", "false").lower() == "true",
-                num_properties=num_properties,
-                scope=scope,
-                model=data.get("Model", "").strip(),
-                display_name=data.get("DisplayName", "").strip()
-            )
-            
-            return ClassDef(
-                name=name,
-                parent=parent,
-                source=source,
-                properties=data,  # Include all fields in properties
-                inidbi_meta=meta
-            )
-            
-        except Exception as e:
-            logger.debug(f"Error creating class from fields: {fields} - {e}")
-            return None
-
-    def get_class(self, class_name: str) -> Optional[ClassDef]:
-        """Get class definition by exact name"""
-        return self._class_lookup.get(class_name)
-
-    def find_classes(self, name_pattern: str) -> Set[ClassDef]:
-        """Find classes matching a pattern"""
-        pattern = re.compile(name_pattern)
-        return {
-            cls for cls in self._class_lookup.values()
-            if pattern.match(cls.name)
-        }
-
-class MissionParser(BaseParser):
-    """Parser specifically for mission files like loadouts and configs"""
-    
-    def __init__(self):
-        super().__init__()
-        # Add patterns needed for parsing
-        self._class_pattern = re.compile(
-            r'class\s+(\w+)(?:\s*:\s*(\w+))?\s*({[^{}]*(?:{[^{}]*}[^{}]*)*})',
-            re.MULTILINE | re.DOTALL
-        )
-        # Add pattern for #define directives
-        self._define_pattern = re.compile(r'#define\s+(\w+)\s+(.+)$', re.MULTILINE)
-        
-        self._mission_patterns = {
-            r'.*loadout\.hpp$',
-            r'.*description\.ext$',
-            r'.*cfgFunctions\.hpp$',
-            r'.*funcs\.hpp$'  # Add pattern for funcs.hpp
-        }
-        self._mission_patterns = [re.compile(p) for p in self._mission_patterns]
-        
-        self._known_local_bases = {
-            'baseMan',       # Common loadout base class
-            'CfgFunctions',  # Functions config
-            'CfgSounds',     # Sounds config
-            'CfgMusic',      # Music config
-            'functions',     # Function category class
-        }
-        
-        self._mission_local_classes = set()
-        self._equipment_arrays = {
-            'primaryWeapon', 'secondaryWeapon', 'handgunWeapon',
-            'uniform', 'vest', 'backpack', 'magazines', 'items',
-            'linkedItems', 'sidearmWeapon', 'attachment', 'scope',
-            'silencer', 'bipod', 'backpackItems'
-        }
-        self._list_macro_pattern = re.compile(r'LIST_(\d+)\s*\(\s*(["\']?)([^"\'\)]*)\2\s*\)')
-        self._processed_classes = set()
-        # Add dictionary to store defines
-        self._defines: Dict[str, str] = {}
-
-    def is_mission_file(self, path: Path) -> bool:
-        """Check if file is a mission-specific config"""
-        return any(p.match(str(path)) for p in self._mission_patterns)
-
-    def parse_file(self, path: Path) -> Set[ClassDef]:
-        """Parse mission file and extract only external class references"""
-        try:
-            content = path.read_text(encoding='utf-8')
-            # First process any #define directives
-            self._process_defines(content)
-            source = path.stem
-            return self._parse_mission_content(content, source)
-        except Exception as e:
-            logger.error(f"Failed to parse mission file {path}: {e}")
-            return set()
-
-    def _process_defines(self, content: str):
-        """Process #define directives and store them"""
-        self._defines.clear()  # Clear existing defines
-        for match in self._define_pattern.finditer(content):
-            name, value = match.groups()
-            # Store the define, stripping any trailing comments
-            value = value.split('//')[0].strip()
-            self._defines[name] = value
-
-    def _is_local_class(self, name: str, parent: Optional[str] = None) -> bool:
-        """Check if class is mission-local rather than external reference"""
-        # Also check if this is a functions class member
-        is_function_member = '.' in name and name.split('.')[0] == 'functions'
-        return (name in self._known_local_bases or
-                name in self._mission_local_classes or 
-                parent in self._known_local_bases or
-                is_function_member)
-
-    def _parse_mission_content(self, content: str, source: str) -> Set[ClassDef]:
-        """Parse content extracting only external class references"""
-        referenced_classes = set()
-        current_class_properties = {}
-        
-        for match in self._class_pattern.finditer(content):
-            name, parent, body = match.groups()
-            name = name.strip() if name else ""
-            if not name or name.isdigit():
-                continue
-                
-            # Skip local mission classes, only collect their references    
-            if self._is_local_class(name, parent):
-                self._mission_local_classes.add(name)
-                clean_body = self._clean_class_body(body.strip('{}'))
-                # Parse array properties properly
-                properties = self._extract_properties(clean_body)
-                # Process array properties and extract equipment
-                self._extract_equipment_references(properties, referenced_classes, source)
-                
-        return referenced_classes
-
-    def _clean_class_body(self, body: str) -> str:
-        """Clean class body by removing comments and normalizing whitespace"""
-        # Remove /* */ style comments
-        body = re.sub(r'/\*.*?\*/', '', body, flags=re.DOTALL)
-        # Remove // style comments
-        body = re.sub(r'//[^\n]*', '', body)
-        return body.strip()
-
-    def _extract_properties(self, body: str) -> Dict[str, str]:
-        """Extract properties from class body"""
-        properties = {}
-        lines = [l.strip() for l in body.split(';') if l.strip()]
-        
-        for line in lines:
-            if '=' in line and not line.strip().startswith('class'):
-                try:
-                    key, value = line.split('=', 1)
-                    key = key.strip()
-                    value = value.strip()
-                    if key and value:
-                        properties[key] = value
-                except Exception:
-                    continue
-                    
-        return properties
-
-    def _extract_equipment_references(self, properties: Dict[str, str], 
-                                   classes: Set[ClassDef], source: str):
-        """Extract equipment references with improved comma handling"""
-        for key, value in properties.items():
-            key = key.strip('[]')
-            if key not in self._equipment_arrays:
-                continue
-
-            if value.startswith('{'):
-                # Handle array format
-                content = value.strip('{}')
-                items = []
-                # Split by commas but preserve quoted strings
-                current = []
-                in_quotes = False
-                
-                for char in content:
-                    if char == '"':
-                        in_quotes = not in_quotes
-                    if char == ',' and not in_quotes:
-                        item = ''.join(current).strip().strip('"')
-                        if item and not item.startswith('//'):
-                            items.append(item)
-                        current = []
-                    else:
-                        current.append(char)
-                
-                # Handle last item
-                if current:
-                    item = ''.join(current).strip().strip('"')
-                    if item and not item.startswith('//'):
-                        items.append(item)
-            else:
-                items = [value.strip()]
-
-            # Process items...
-            for item in items:
-                # Handle LIST macro with improved empty detection
-                if list_match := self._list_macro_pattern.match(item):
-                    count = int(list_match.group(1))
-                    content = list_match.group(3)
-                    
-                    # Skip if content is empty or just whitespace
-                    if not content or content.isspace():
-                        continue
-                        
-                    if content and not self._is_local_class(content):
-                        # Simplified class reference creation
-                        ref_class = ClassDef(
-                            name=content,
-                            is_reference=True,
-                            properties={"list_count": str(count)} if count > 1 else {}
-                        )
-                        classes.add(ref_class)
-                # Handle regular items        
-                elif item and not item.isdigit() and not self._is_local_class(item):
-                    # Simplified class reference creation - only needs name
-                    ref_class = ClassDef(
-                        name=item,
-                        is_reference=True
-                    )
-                    classes.add(ref_class)

@@ -1,6 +1,7 @@
 import os
 import sys
 from pathlib import Path
+import argparse
 
 # Add project root to Python path
 project_root = Path(__file__).parent.parent
@@ -8,11 +9,10 @@ sys.path.append(str(project_root))
 
 from src.core.database import ClassDatabase
 from src.core.validator import MissionValidator, MissionValidationError
-from src.core.parser import InidbiParser
+from src.core.parser_ini import InidbiParser
 import logging
 from typing import Optional, Dict, Any
 import sys
-import json
 from datetime import datetime
 import yaml
 
@@ -122,6 +122,14 @@ def write_validation_report(validator: MissionValidator, mission_path: Path) -> 
     return report_path
 
 def main():
+    # Add argument parsing
+    parser = argparse.ArgumentParser(description="Check mission files for required classes")
+    parser.add_argument("--mission", default=r"C:\pca_missions", help="Path to mission folder")
+    parser.add_argument("--mods", default=r"C:\pcanext", help="Path to mods folder")
+    parser.add_argument("--config", help="Path to INIDBI config file", 
+                       default=str(Path(__file__).parent.parent / "data" / "ConfigExtract_pcanext.ini"))
+    args = parser.parse_args()
+
     # Configure logging
     logging.basicConfig(
         level=logging.INFO,
@@ -134,9 +142,9 @@ def main():
 
     # Paths configuration
     paths = {
-        "Mods": Path(r"C:\pcanext"),
-        "Missions": Path(r"C:\pca_missions"),
-        "Config": Path(__file__).parent.parent / "data" / "ConfigExtract_pcanext.ini"
+        "Mods": Path(args.mods),
+        "Missions": Path(args.mission),
+        "Config": Path(args.config)
     }
     cache_dir = Path(__file__).parent.parent / ".cache"
 
