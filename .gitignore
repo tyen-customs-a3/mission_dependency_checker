@@ -8,3 +8,4 @@ debug/
 data/
 *.graphml
 .coverage
+mission_checker.log
