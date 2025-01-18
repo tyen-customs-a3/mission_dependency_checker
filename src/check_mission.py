@@ -1,4 +1,5 @@
 from pathlib import Path
+from core.database import ClassDatabase
 from core.validator import MissionValidator, MissionValidationError
 from core.parser import InidbiParser  # Add this import
 import logging
@@ -41,16 +42,6 @@ def validate_ini_file(ini_path: Path) -> Optional[str]:
         logging.info(f"\nINIDB Config Analysis:")
         logging.info(f"Found {len(classes)} base class definitions")
         
-        # Count classes by category
-        categories = {}
-        for cls in classes:
-            if hasattr(cls, 'inidbi_meta') and cls.inidbi_meta:
-                cat = cls.inidbi_meta.category
-                categories[cat] = categories.get(cat, 0) + 1
-                
-        for cat, count in sorted(categories.items()):
-            logging.info(f"- {cat}: {count} classes")
-            
         return None
         
     except Exception as e:
@@ -62,17 +53,58 @@ def write_validation_report(validator: MissionValidator, mission_path: Path) -> 
     report_dir = Path("reports")
     report_dir.mkdir(exist_ok=True)
     
-    # Generate report filename from mission name
     mission_name = mission_path.name
-    report_path = report_dir / f"validation_{mission_name}_{timestamp}.yml"
+    report_path = report_dir / f"validation_{mission_name}_{timestamp}.txt"
     
-    # Get validation summary
-    summary = validator.get_validation_summary()
-    
-    # Write YAML report
+    # Generate human readable report
     with open(report_path, 'w') as f:
-        yaml.safe_dump(summary, f, default_flow_style=False, sort_keys=False)
+        # Write header
+        f.write("Mission Validation Report\n")
+        f.write("=" * 50 + "\n\n")
+        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Mission: {mission_name}\n\n")
+
+        summary = validator.get_validation_summary()
         
+        # Write overall statistics
+        f.write("Overall Statistics\n")
+        f.write("-" * 20 + "\n")
+        total_classes = sum(m['total_classes'] for m in summary['missions'].values())
+        total_found = sum(m['found_in_database'] for m in summary['missions'].values())
+        total_missing = sum(m['missing_from_database'] for m in summary['missions'].values())
+        
+        f.write(f"Total Classes Found: {total_classes}\n")
+        f.write(f"Found in Database: {total_found}\n")
+        f.write(f"Missing from Database: {total_missing}\n\n")
+
+        # Write per-mission details
+        f.write("Mission Details\n")
+        f.write("-" * 20 + "\n")
+        
+        for mission_name, mission_data in sorted(summary['missions'].items()):
+            f.write(f"\n{mission_name}:\n")
+            f.write(f"  Classes Found: {mission_data['total_classes']}\n")
+            f.write(f"  Validated: {mission_data['found_in_database']}\n")
+            f.write(f"  Missing: {mission_data['missing_from_database']}\n")
+            
+            if mission_data['missing_from_database'] > 0:
+                f.write("\n  Missing Classes:\n")
+                for cls in sorted(c['name'] for c in mission_data['classes'] if not c['found_in_database']):
+                    f.write(f"    - {cls}\n")
+            f.write("\n")
+
+        # Write warnings section if any
+        if summary.get('warnings'):
+            f.write("\nWarnings\n")
+            f.write("-" * 20 + "\n")
+            for warning in sorted(summary['warnings']):
+                f.write(f"! {warning}\n")
+
+    # Also write machine-readable YAML version
+    yaml_path = report_path.with_suffix('.yml')
+    with open(yaml_path, 'w') as f:
+        yaml.safe_dump(summary, f)
+
     return report_path
 
 def main():
@@ -88,8 +120,8 @@ def main():
 
     # Paths configuration
     paths = {
-        "Mods": Path(r"C:\pcanext_test"),
-        "Missions": Path(r"C:\pca_missions_quick"),
+        "Mods": Path(r"C:\pcanext"),
+        "Missions": Path(r"C:\pca_missions"),
         "Config": Path(__file__).parent.parent / "data" / "ConfigExtract_pcanext.ini"
     }
     cache_dir = Path(__file__).parent.parent / ".cache"
@@ -104,14 +136,27 @@ def main():
         print(f"Config validation error: {error}")
         sys.exit(1)
 
-    # Initialize validator
+    # Correct database population
+    print("\nBuilding class database from config...")
+    database = ClassDatabase()
+    if paths["Config"].exists():
+        ini_parser = InidbiParser()
+        classes_by_source = ini_parser.parse_file(paths["Config"])
+        total_classes = 0
+        for source, class_set in classes_by_source.items():
+            for cls in class_set:
+                database.add_class(cls)
+                total_classes += 1
+        print(f"Loaded {total_classes} total classes from {len(classes_by_source)} sources")
+    else:
+        print("Warning: No config file found, database will be empty")
+
+    # Initialize validator with the populated database
     validator = MissionValidator(
         cache_dir=cache_dir,
-        file_patterns=[
-            r".*\.sqf$",
-            r".*\.pbo$",
-            r".*\.(paa|p3d)$"
-        ]
+        file_patterns=[r".*\.sqf$", r".*\.pbo$", r".*\.(paa|p3d)$"],
+        config_path=paths["Config"],
+        database=database  # Pass our pre-populated database
     )
 
     print(f"\nValidating missions in: {paths['Missions']}")
@@ -127,11 +172,15 @@ def main():
         report_path = write_validation_report(validator, paths["Missions"])
         print(f"\nDetailed report written to: {report_path}")
         
-        # Only show issues in terminal
+        # Show expanded item counts - removed references to non-existent methods
+        print("\nClass Analysis:")
+        print("-" * 60)
+        print(f"Total classes found: {len(validator.get_all_classes())}")
+        
         if not warnings:
             print("\n✓ No validation issues found")
             return 0
-            
+
         print("\nValidation Issues:")
         print("-" * 60)
         
@@ -165,4 +214,5 @@ def main():
         return 2
 
 if __name__ == "__main__":
+
     sys.exit(main())

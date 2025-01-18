@@ -19,6 +19,7 @@ class ClassDatabase:
         sqlite3.register_adapter(datetime, lambda dt: dt.isoformat())
         sqlite3.register_converter('timestamp', lambda b: datetime.fromisoformat(b.decode()))
         self._initialize_db()
+        self._required_classes = set()
     
     def _initialize_db(self):
         """Initialize SQLite database schema"""
@@ -39,12 +40,29 @@ class ClassDatabase:
                 FOREIGN KEY(class_id) REFERENCES classes(id)
             );
 
+            CREATE TABLE IF NOT EXISTS required_classes (
+                name TEXT PRIMARY KEY,
+                category TEXT,
+                reason TEXT
+            );
+
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
         """)
     
-    def add_class(self, class_def: ClassDef) -> None:
+    def add_class(self, class_def) -> None:
         """Add or update a class definition"""
+        # Convert string to ClassDef if needed
+        if isinstance(class_def, str):
+            class_def = ClassDef(
+                name=class_def,
+                parent=None,
+                source="unknown",
+                properties={}
+            )
+        elif not hasattr(class_def, 'name'):
+            raise TypeError(f"Expected ClassDef or string, got {type(class_def)}")
+            
         cursor = self._conn.cursor()
         try:
             cursor.execute("""
@@ -138,6 +156,44 @@ class ClassDatabase:
         
         _get_parent_recursive(class_name)
         return chain
+
+    def get_class(self, class_name: str) -> bool:
+        """Check if class exists in database"""
+        if not class_name:
+            return False
+            
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT EXISTS(SELECT 1 FROM classes WHERE name = ? LIMIT 1)", 
+                (class_name,)
+            )
+            return bool(cursor.fetchone()[0])
+
+    def add_required_class(self, name: str, category: str = None, reason: str = None) -> None:
+        """Mark a class as required"""
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO required_classes (name, category, reason) VALUES (?, ?, ?)",
+                (name, category, reason)
+            )
+        self._required_classes.add(name)
+
+    def get_required_classes(self) -> Set[str]:
+        """Get all required class names"""
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT name FROM required_classes")
+            return {row[0] for row in cursor}
+
+    def get_class_requirements(self, class_name: str) -> Dict[str, str]:
+        """Get requirement details for a class"""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT category, reason FROM required_classes WHERE name = ?",
+                (class_name,)
+            )
+            if row := cursor.fetchone():
+                return {"category": row[0], "reason": row[1]}
+        return {}
 
     def _get_connection(self):
         """Return existing connection"""

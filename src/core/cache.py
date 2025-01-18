@@ -65,17 +65,20 @@ class CacheManager:
         return None
         
     def cache_scan(self, path: str, scan_result) -> None:
-        """Cache scan results, handling SQF files specially"""
+        """Cache scan results with better error handling"""
         try:
+            # Only cache if we have valid data
+            if not scan_result:
+                return
+                
             path_hash = self._get_path_hash(path)
             
-            # Filter out SQF files with "sqf_present" checksum before caching
-            filtered_result = {
-                asset for asset in scan_result
-                if not (asset.checksum == "sqf_present" and 
-                       str(asset.path).lower().endswith('.sqf'))
-            }
-            
+            # Handle both set and list results
+            if isinstance(scan_result, (set, list)):
+                data = pickle.dumps(list(scan_result))
+            else:
+                data = pickle.dumps(scan_result)
+                
             self._get_connection().execute(
                 """INSERT OR REPLACE INTO scan_cache 
                    (path_hash, path, data, timestamp, invalidated)
@@ -83,7 +86,7 @@ class CacheManager:
                 (
                     path_hash,
                     path,
-                    pickle.dumps(filtered_result),
+                    data,
                     datetime.now(),
                     False
                 )

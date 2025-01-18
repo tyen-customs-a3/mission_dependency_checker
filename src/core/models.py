@@ -53,8 +53,9 @@ class ClassDef:
     source: str
     properties: Dict[str, str]
     scope: str = "private"
+    is_reference: bool = False  # Add flag for referenced classes
     inidbi_meta: Optional[InidbiClass] = None
-    nested_classes: Set['ClassDef'] = None
+    nested_classes: Set['ClassDef'] = field(default_factory=set)
     
     def __post_init__(self):
         if self.nested_classes is None:

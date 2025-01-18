@@ -29,6 +29,22 @@ class ClassParser(BaseParser):
         self._inheritance_graph: DefaultDict[str, Set[str]] = defaultdict(set)
         self._class_sources: Dict[str, Set[str]] = defaultdict(set)
 
+        # Loadout-specific patterns
+        self._list_macro_pattern = re.compile(r'LIST_(\d+)\("([^"]+)"\)')
+        self._equipment_arrays = {
+            'primaryWeapon', 'secondaryWeapon', 'handgunWeapon',
+            'uniform', 'vest', 'backpack', 'magazines', 'items',
+            'linkedItems', 'sidearmWeapon', 'attachment', 'scope',
+            'silencer', 'bipod', 'backpackItems'  # Added backpackItems
+        }
+        self._processed_classes = set()  # Add set to track unique class names
+
+        # Add ignore patterns
+        self._ignore_patterns = [
+            re.compile(r'.*\.varInit$'),
+            re.compile(r'LIST_\d+\(""\)')  # Fix pattern
+        ]
+
     def _find_included_files(self, content: str, base_path: Path) -> Generator[Path, None, None]:
         """Find and resolve #include statements"""
         for match in self._config_pattern.finditer(content):
@@ -63,59 +79,75 @@ class ClassParser(BaseParser):
         return self._parse_class_content(content, source)
 
     def _parse_class_content(self, content: str, source: str) -> Set[ClassDef]:
-        """Parse regular class definitions including nested classes"""
+        """Parse class definitions with better nested class handling"""
         classes = set()
         
-        for match in self._class_pattern.finditer(content):
+        # Find all top-level class definitions first
+        matches = list(self._class_pattern.finditer(content))
+        
+        for match in matches:
             name, parent, body = match.groups()
+            name = name.strip()
             
-            # Extract properties and nested content
+            # Skip if this is an empty or invalid class name
+            if not name or name.isdigit():
+                continue
+                    
             properties = {}
-            nested_content = ""
-            nested_level = 0
+            nested_classes = []
+            current_line = []
+            bracket_level = 0
+            in_nested = False
             
-            for line in body.split(";"):
+            # Process body line by line
+            for line in body.split(';'):
                 line = line.strip()
                 if not line:
                     continue
                     
-                if "class" in line:
-                    nested_content += line + ";"
-                    nested_level += line.count("{")
-                    nested_level -= line.count("}")
-                elif nested_level > 0:
-                    nested_content += line + ";"
-                    nested_level += line.count("{")
-                    nested_level -= line.count("}")
-                elif "=" in line:
-                    key, value = line.split("=", 1)
+                # Handle nested class definitions
+                if 'class' in line and not line.startswith('//'):
+                    in_nested = True
+                    current_line = [line]
+                    bracket_level = line.count('{')
+                    continue
+                        
+                if in_nested:
+                    current_line.append(line)
+                    bracket_level += line.count('{') - line.count('}')
+                    if bracket_level == 0:
+                        nested_content = ';'.join(current_line)
+                        nested_matches = self._class_pattern.finditer(nested_content)
+                        for nested_match in nested_matches:
+                            nested_name, nested_parent, nested_body = nested_match.groups()
+                            if nested_name and not nested_name.isdigit():
+                                nested_classes.extend(self._parse_class_content(nested_content, source))
+                        in_nested = False
+                        continue
+                        
+                # Handle properties
+                if '=' in line and not in_nested:
+                    key, value = line.split('=', 1)
                     properties[key.strip()] = value.strip()
             
-            # Create main class
-            class_def = ClassDef(name=name, parent=parent, properties=properties, source=source)
+            # Create the main class
+            class_def = ClassDef(
+                name=name,
+                parent=parent.strip() if parent else None,
+                properties=properties,
+                source=source
+            )
             classes.add(class_def)
             
-            # Handle nested classes
-            if nested_content:
-                nested_matches = self._class_pattern.finditer(nested_content)
-                for nested_match in nested_matches:
-                    nested_name, nested_parent, nested_body = nested_match.groups()
-                    nested_properties, _ = self._extract_properties_and_nested(nested_body)
-                    
-                    nested_class = ClassDef(
-                        name=f"{name}.{nested_name}",
-                        parent=name,
-                        properties=nested_properties,
-                        source=source
-                    )
-                    classes.add(nested_class)
-                    class_def.nested_classes.add(nested_class)
-                    
-            # Update inheritance tracking
-            if parent:
-                self._inheritance_graph[parent].add(name)
-            self._class_sources[name].add(source)
-                
+            # Extract equipment references from properties
+            self._extract_equipment_references(properties, classes, source)
+            
+            # Process nested classes
+            for nested in nested_classes:
+                if '.' not in nested.name:
+                    nested.name = f"{name}.{nested.name}"
+                classes.add(nested)
+
         return classes
 
     def _parse_inidbi_content(self, content: str, source: str) -> Set[ClassDef]:
@@ -147,7 +179,7 @@ class ClassParser(BaseParser):
         """Parse INIDBI2 format line"""
         try:
             idx, data = line.split('=', 1)
-            fields = next(csv.reader([data]))
+            fields = next(csv.reader([data.strip('"')]))  # Strip quotes from entire data
             if len(fields) < 8:
                 return None
                 
@@ -157,7 +189,7 @@ class ClassParser(BaseParser):
             
             meta = InidbiClass(
                 category=category,
-                source_mod=mod,
+                source_mod=mod,  # Store original mod name
                 properties={},
                 inherits_from=inherits if inherits else None,
                 is_simple_object=is_simple.lower() == 'true',
@@ -167,37 +199,58 @@ class ClassParser(BaseParser):
                 display_name=display_name
             )
             
-            return ClassDef(
+            class_def = ClassDef(
                 name=name,
                 parent=parent if parent else None,
-                source=mod,
+                source=mod,  # Use mod as source directly
                 properties={},
                 inidbi_meta=meta
             )
+            
+            # Add to class sources tracking
+            self._class_sources[name].add(mod)
+            
+            return class_def
             
         except Exception as e:
             logger.error(f"Error parsing INIDBI line: {line} - {e}")
             return None
 
     def _extract_properties_and_nested(self, body: str) -> Tuple[Dict[str, str], str]:
-        """
-        Extract properties and identify nested class content
-        
-        Returns:
-            Tuple of (properties dict, nested class content)
-        """
+        """Extract properties and nested content with improved array handling"""
         properties = {}
         nested_content = ""
-        
-        # Track nested class brackets
         bracket_level = 0
-        current_property = []
-        
+        in_array = False
+        current_array = []
+
         for line in body.split(";"):
             line = line.strip()
             if not line:
                 continue
-                
+
+            # Handle arrays explicitly
+            if line.endswith("[]=") or line.endswith("[] ="):
+                in_array = True
+                current_array = []
+                continue
+
+            if in_array:
+                if line.startswith("{"):
+                    current_array = []
+                elif line.startswith("}"):
+                    # Join array items and save property
+                    array_key = next((k for k in properties if k.endswith("[]")), None)
+                    if array_key:
+                        properties[array_key] = "{" + ",".join(current_array) + "}"
+                    in_array = False
+                elif line:
+                    # Clean and add array item
+                    item = line.strip(",").strip()
+                    if item:
+                        current_array.append(item)
+                continue
+
             # Track nested class definitions
             bracket_level += line.count("{") - line.count("}")
             
@@ -206,7 +259,7 @@ class ClassParser(BaseParser):
             elif "=" in line and bracket_level == 0:
                 key, value = line.split("=", 1)
                 properties[key.strip()] = value.strip()
-                
+
         return properties, nested_content
 
     def validate_class(self, class_def: ClassDef, available_classes: Set[ClassDef]) -> List[str]:
@@ -364,100 +417,306 @@ class ClassParser(BaseParser):
             
         return chain
 
+    def _extract_equipment_references(self, properties: Dict[str, str], classes: Set[ClassDef], source: str):
+        """Extract equipment references with improved array handling"""
+        def clean_item_name(item: str) -> Optional[str]:
+            """Clean up item name by removing comment markers"""
+            # Strip any comment markers and handle trailing comments
+            item = item.strip()
+
+            # Handle // comments first
+            if '//' in item:
+                item = item.split('//')[0].strip()
+
+            # Handle /* */ comments
+            if '/*' in item and '*/' in item:
+                comment_start = item.find('/*')
+                comment_end = item.find('*/') + 2
+                item = (item[:comment_start] + item[comment_end:]).strip()
+            elif item.startswith('/*'):
+                item = item[2:].strip()
+            elif item.endswith('*/'):
+                item = item[:-2].strip()
+
+            # Handle quote marks if present
+            if item.startswith('"') and item.endswith('"'):
+                item = item[1:-1].strip()
+            
+            # Skip empty or all-comment items
+            if not item or item.startswith('//') or item.startswith('/*'):
+                return None
+                
+            # Skip empty LIST macros
+            if re.match(r'LIST_\d+\(""\)', item) or re.match(r'LIST_\d+\("")', item):
+                return None
+                
+            # Skip .varInit suffixes
+            if item.endswith('.varInit'):
+                item = item[:-8]  # Remove .varInit suffix
+
+            # Clean up array format that has numeric values after class names
+            if ',' in item:
+                parts = item.split(',')
+                item = parts[0].strip()
+
+            # Handle string literals with trailing values
+            if '"' in item:
+                item = item.split('"')[1]  # Get content between quotes
+
+            # Skip pure numeric values
+            if item.replace(".", "").isdigit():
+                return None
+                
+            # Remove any trailing whitespace/commas
+            item = item.rstrip(',').strip()
+            
+            return item
+
+        def parse_array_content(content: str) -> List[str]:
+            """Parse array content handling class name + value pairs"""
+            items = []
+            parts = content.split(',')
+            i = 0
+            while i < len(parts):
+                part = parts[i].strip()
+                # Skip empty parts
+                if not part:
+                    i += 1
+                    continue
+                    
+                # If it's a quoted string, it's likely a class name
+                if part.startswith('"'):
+                    class_name = part.strip('"')
+                    if class_name:
+                        items.append(class_name)
+                    # Skip the next part which should be the numeric value
+                    i += 2
+                else:
+                    # Handle non-quoted items
+                    if not part.replace(".", "").isdigit():
+                        items.append(part)
+                    i += 1
+            return items
+
+        for key, value in properties.items():
+            key = key.strip('[]')
+            if key not in self._equipment_arrays:
+                continue
+
+            # Clean up array value
+            array_value = value.strip()
+            if not array_value:
+                continue
+
+            # Handle both single-item and multi-item arrays
+            items = []
+            if array_value.startswith('{'):
+                # Split array content by commas while preserving quoted strings and comments
+                content = array_value.strip('{}')
+                current = []
+                in_quotes = False
+                in_comment = False
+                comment_type = None  # Could be '//' or '/*'
+                
+                for i, char in enumerate(content):
+                    if not in_comment:
+                        if char == '"':
+                            in_quotes = not in_quotes
+                        elif not in_quotes and char == '/' and i + 1 < len(content) and content[i+1] == '/':
+                            in_comment = True
+                            comment_type = '//'
+                            current.append(char)
+                        elif not in_quotes and char == '/' and i + 1 < len(content) and content[i+1] == '*':
+                            in_comment = True
+                            comment_type = '/*'
+                            current.append(char)
+                        elif char == ',' and not in_quotes:
+                            item = ''.join(current).strip()
+                            if clean_name := clean_item_name(item):
+                                items.append(clean_name)
+                            current = []
+                            continue
+                        current.append(char)
+                    else:
+                        current.append(char)
+                        if comment_type == '//' and char == '\n':
+                            in_comment = False
+                        elif comment_type == '/*' and char == '/' and current[-2] == '*':
+                            in_comment = False
+                
+                # Add last item if present
+                if current:
+                    item = ''.join(current).strip()
+                    if clean_name := clean_item_name(item):
+                        items.append(clean_name)
+            else:
+                # Handle single item
+                if clean_name := clean_item_name(array_value):
+                    items.append(clean_name)
+
+            # Process each item - modified to check for duplicates
+            for item in items:
+                # Handle LIST macro items
+                if list_match := re.match(r'LIST_(\d+)\("([^"]+)"\)', item):
+                    count = int(list_match.group(1))
+                    class_name = list_match.group(2)
+                    if class_name and class_name not in self._processed_classes:
+                        self._processed_classes.add(class_name)
+                        ref_class = ClassDef(
+                            name=class_name,
+                            parent=None,
+                            source=source,
+                            properties={"list_count": str(count)},
+                            is_reference=True
+                        )
+                        classes.add(ref_class)
+                else:
+                    # Regular items are already cleaned by clean_item_name
+                    if not item.isdigit() and item not in self._processed_classes:  # Skip pure number values
+                        self._processed_classes.add(item)
+                        ref_class = ClassDef(
+                            name=item,
+                            parent=None,
+                            source=source,
+                            properties={},
+                            is_reference=True
+                        )
+                        classes.add(ref_class)
+
 class InidbiParser(BaseParser):
-    """Parser for INIDBI2 format files"""
-    
     def __init__(self):
         super().__init__()
-        self._category_pattern = re.compile(r'\[CategoryData_(\w+)\]')
-        self._header_pattern = re.compile(r'header="([^"]+)"')
-        self._row_pattern = re.compile(r'(\d+)="([^"]+)"')
-        # Define default header fields
         self._default_headers = [
             "ClassName", "Source", "Category", "Parent",
             "InheritsFrom", "IsSimpleObject", "NumProperties", 
             "Scope", "Model", "DisplayName"
         ]
+        self._sources = set()
+        self._class_lookup: Dict[str, ClassDef] = {}
 
-    def parse_file(self, path: Path) -> Set[ClassDef]:
-        """Parse INIDBI2 format file and return flat set of classes"""
+    def parse_file(self, path: Path) -> Dict[str, Set[ClassDef]]:
+        """Parse INIDBI format with proper quote handling"""
         try:
-            classes = set()
+            classes_by_source = defaultdict(set)
+            self._class_lookup.clear()
+            self._sources.clear()
+            
             current_category = None
-            header_fields = self._default_headers  # Use default headers
+            header_fields = self._default_headers
             
-            content = path.read_text(encoding='utf-8', errors='ignore')
+            lines = path.read_text(encoding='utf-8', errors='ignore').splitlines()
             
-            for line in content.splitlines():
+            for line in lines:
                 line = line.strip()
                 if not line or line.startswith(';'):
                     continue
-                    
-                # Check for header definition
-                if line.startswith('header='):
-                    try:
-                        header_str = line.split('=', 1)[1].strip('"')
-                        header_fields = [f.strip() for f in header_str.split(',')]
-                        continue
-                    except Exception:
-                        header_fields = self._default_headers
-                    
-                # Handle category headers    
-                if line.startswith('['):
-                    if cat_match := self._category_pattern.match(line):
-                        current_category = cat_match.group(1)
+
+                # Handle category headers
+                if line.startswith('[CategoryData_'):
+                    current_category = line[13:-1]  # Remove brackets
                     continue
-                    
-                # Parse data lines
-                if '=' in line and current_category:
+
+                # Handle header line
+                if line.startswith('header='):
+                    header_line = line[7:].strip('"')
+                    header_fields = next(csv.reader([header_line]))
+                    header_fields = [f.strip() for f in header_fields]
+                    continue
+
+                # Handle data lines
+                if current_category and '=' in line:
+                    if line.startswith('header='):
+                        continue
+                        
                     try:
-                        _, data = line.split('=', 1)
-                        if class_def := self._parse_class_data(data.strip('"'), current_category, header_fields):
-                            classes.add(class_def)
+                        idx, data = line.split('=', 1)
+                        data = data.strip().strip('"')  # Strip outer quotes
+                        fields = next(csv.reader([data]))  # Use csv parser for field splitting
+                        
+                        if class_def := self._create_class(fields, current_category, header_fields):
+                            source = class_def.source
+                            classes_by_source[source].add(class_def)
+                            self._sources.add(source)
+                            self._class_lookup[class_def.name] = class_def
+                            
                     except Exception as e:
-                        logger.error(f"Error parsing line '{line}': {e}")
-            
-            logger.info(f"Parsed {len(classes)} classes from {path}")
-            return classes
+                        logger.debug(f"Skipping malformed line: {line} - {e}")
+                        continue
+
+            logger.info(f"Parsed {sum(len(classes) for classes in classes_by_source.values())} "
+                       f"total classes from {len(classes_by_source)} sources")
+                       
+            return dict(classes_by_source)
             
         except Exception as e:
             logger.error(f"Failed to parse INIDBI file {path}: {e}")
-            return set()
+            return {}
 
-    def _parse_class_data(self, data: str, category: str, header_fields: List[str]) -> Optional[ClassDef]:
-        """Parse class data from CSV format with flexible headers"""
+    def _create_class(self, fields: List[str], category: str, headers: List[str]) -> Optional[ClassDef]:
+        """Fixed class creation logic"""
         try:
-            fields = next(csv.reader([data]))
-            if len(fields) < 5:  # Minimum required fields
+            # Ensure we have minimum required fields
+            if len(fields) < 3:  # Need at least classname, source, category
                 return None
                 
-            # Create dict with default values for missing fields
-            data_dict = dict(zip(self._default_headers, [""] * len(self._default_headers)))
-            # Update with actual values
-            data_dict.update(dict(zip(header_fields[:len(fields)], fields)))
+            # Map fields to headers, handling any missing fields
+            data = {}
+            for i, header in enumerate(headers):
+                if i < len(fields):
+                    data[header] = fields[i].strip()
+                else:
+                    data[header] = ""
             
+            name = data.get("ClassName", "").strip()
+            if not name:  # Skip if no class name
+                return None
+                
+            source = data.get("Source", "unknown").strip()
+            parent = data.get("Parent", "").strip() or None
+            
+            # Handle empty or invalid fields gracefully
+            try:
+                num_properties = int(data.get("NumProperties", 0))
+            except ValueError:
+                num_properties = 0
+
+            try:
+                scope = int(data.get("Scope", 0))
+            except ValueError:
+                scope = 0
+
             meta = InidbiClass(
                 category=category,
-                source_mod=data_dict.get("Source", "unknown"),
-                properties={},
-                inherits_from=data_dict.get("InheritsFrom"),
-                is_simple_object=data_dict.get("IsSimpleObject", "false").lower() == "true",
-                num_properties=int(data_dict.get("NumProperties", 0)),
-                scope=int(data_dict.get("Scope", 0)),
-                model=data_dict.get("Model"),
-                display_name=data_dict.get("DisplayName")
+                source_mod=source,
+                properties=data,  # Store all fields in properties
+                inherits_from=data.get("InheritsFrom", "").strip() or None,
+                is_simple_object=data.get("IsSimpleObject", "false").lower() == "true",
+                num_properties=num_properties,
+                scope=scope,
+                model=data.get("Model", "").strip(),
+                display_name=data.get("DisplayName", "").strip()
             )
             
             return ClassDef(
-                name=data_dict.get("ClassName", "Unknown"),
-                parent=data_dict.get("Parent"),
-                source=data_dict.get("Source", "unknown"),
-                properties={},
+                name=name,
+                parent=parent,
+                source=source,
+                properties=data,  # Include all fields in properties
                 inidbi_meta=meta
             )
             
         except Exception as e:
-            logger.error(f"Error parsing INIDBI data: {data} - {e}")
+            logger.debug(f"Error creating class from fields: {fields} - {e}")
             return None
 
-# ...existing code...
+    def get_class(self, class_name: str) -> Optional[ClassDef]:
+        """Get class definition by exact name"""
+        return self._class_lookup.get(class_name)
+
+    def find_classes(self, name_pattern: str) -> Set[ClassDef]:
+        """Find classes matching a pattern"""
+        pattern = re.compile(name_pattern)
+        return {
+            cls for cls in self._class_lookup.values()
+            if pattern.match(cls.name)
+        }
