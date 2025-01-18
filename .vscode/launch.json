@@ -7,6 +7,22 @@
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
             "console": "integratedTerminal"
+        },
+        {
+            "name": "Check Mission",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/check_mission.py",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "args": [
+                // You can customize these paths based on your setup
+                "--mission", "C:/pca_missions",
+                "--mods", "C:/pcanext",
+                "--config", "${workspaceFolder}/data/ConfigExtract_pcanext.ini"
+            ]
         }
     ]
 }
