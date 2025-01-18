@@ -1,3 +1,5 @@
+#define nades "rhs_mag_m67",LIST_2("rhs_mag_an_m8hc")
+
 class baseMan 
 {
 	displayName = "Unarmed";
@@ -60,6 +62,7 @@ class rm : baseMan
 	};
 	items[] =
 	{
+		nades,
 		"ACRE_PRC343",
 		LIST_20("ACE_fieldDressing"),
 		LIST_20("ACE_packingBandage"),

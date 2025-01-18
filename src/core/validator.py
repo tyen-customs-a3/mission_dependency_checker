@@ -51,9 +51,14 @@ class MissionValidator:
         self.config_path = config_path  # Add config path
         self._ignored_patterns = [
             r'.*\.varInit$',  # Ignore .varInit suffixes
-            r'LIST_\d+\(""\)',  # Fix regex pattern for empty LIST macro
+            r'LIST_\d+\(""\)',  # Empty list with double quotes
+            r'LIST_\d+\(\'\'\)',  # Empty list with single quotes
+            r'LIST_\d+\(\s*\)',  # Empty list with no quotes
+            r'LIST_\d+\(\s*""\s*\)',  # Empty list with spaces
         ]
         self._ignored_regexes = [re.compile(p) for p in self._ignored_patterns]
+        self._missing_by_source = defaultdict(set)  # Track missing items by source
+        self._missing_equipment = defaultdict(set)  # Track by class category instead of source
 
     def get_all_classes(self) -> Set[ClassDef]:
         """Get all classes found during validation"""
@@ -71,34 +76,28 @@ class MissionValidator:
         for mission_name, classes in self._mission_classes.items():
             mission_summary = {
                 'total_classes': len(classes),
+                'found_in_database': 0,
+                'missing_from_database': 0,
                 'classes': []
             }
 
             # Check each class
-            found_count = 0
-            missing_count = 0
-            class_details = []
-
             for class_def in sorted(classes, key=lambda x: x.name):
                 exists_in_db = self.database.get_class(class_def.name)
+                if exists_in_db:
+                    mission_summary['found_in_database'] += 1
+                else:
+                    mission_summary['missing_from_database'] += 1
+                    
                 class_info = {
                     'name': class_def.name,
-                    'found_in_database': exists_in_db,
-                    'source_file': class_def.source,
+                    'found_in_database': bool(exists_in_db),
+                    'source_file': class_def.source
                 }
-                class_details.append(class_info)
-                if exists_in_db:
-                    found_count += 1
-                else:
-                    missing_count += 1
-
-            mission_summary['classes'] = class_details
-            mission_summary['found_in_database'] = found_count
-            mission_summary['missing_from_database'] = missing_count
+                mission_summary['classes'].append(class_info)
 
             summary['missions'][mission_name] = mission_summary
 
-        summary['warnings'] = self._warnings
         return summary
 
     def _count_expanded_items(self) -> int:
@@ -112,20 +111,7 @@ class MissionValidator:
         return total
 
     def validate_mission_folder(self, folder: Path) -> List[str]:
-        """
-        Validate mission folder content with enhanced error checking.
-        
-        Args:
-            folder: Path to mission folder
-            
-        Returns:
-            List of validation warnings/errors
-            
-        Raises:
-            MissionValidationError: For validation-specific errors
-            RuntimeError: For scanning/parsing errors
-        """
-        # Clear missing items at start of validation
+        """Validate mission folder content with enhanced error checking."""
         self._missing_classes.clear()
         self._missing_assets.clear()
 
@@ -148,80 +134,61 @@ class MissionValidator:
 
         warnings = []
         try:
-            # Count files to validate
+            # Basic validation setup
             total_files = sum(1 for _ in folder.rglob("*") if _.is_file())
             if total_files == 0:
                 raise MissionValidationError(
                     f"Mission folder is empty: {folder}",
                     {"path": str(folder)}
                 )
-            
-            logger.info(f"Found {total_files} total files to scan")
 
-            # Scan folder
-            assets = self.scanner.scan_directory(
-                folder,
-                self.file_patterns
-            )
-            
-            # Count asset types
+            # Scan files
+            assets = self.scanner.scan_directory(folder, self.file_patterns)
             sqf_files = sum(1 for a in assets if str(a.path).lower().endswith('.sqf'))
             paa_files = sum(1 for a in assets if str(a.path).lower().endswith('.paa'))
             p3d_files = sum(1 for a in assets if str(a.path).lower().endswith('.p3d'))
             sound_files = sum(1 for a in assets if str(a.path).lower().endswith(('.ogg', '.wss')))
-            
-            logger.info(f"Found assets: {len(assets)} total")
-            logger.info(f"- {sqf_files} SQF scripts")
-            logger.info(f"- {paa_files} PAA textures")
-            logger.info(f"- {p3d_files} P3D models") 
-            logger.info(f"- {sound_files} Sound files")
-            
+
             # Parse config files
-            logger.info("\nScanning config files...")
             config_files = list(folder.rglob("*.cpp")) + list(folder.rglob("*.hpp"))
-            logger.info(f"Found {len(config_files)} config files")
-            
             classes = set()
+
+            # Process each config file
             for config in config_files:
                 try:
-                    new_classes = self.parser.parse_file(config)
+                    new_classes = self.parser.parse_file(config, treat_as_mission=True)
                     classes.update(new_classes)
+                    
                     # Track classes by mission
                     mission_name = folder.name
                     self._mission_classes[mission_name].update(new_classes)
-                    logger.info(f"- {config.relative_to(folder)}: {len(new_classes)} classes")
+                    self._found_classes.update(new_classes)
+
+                    # Validate each class against database
+                    for cls in new_classes:
+                        if cls.is_reference:  # Equipment references
+                            if not self.database.get_class(cls.name):
+                                self._missing_classes.add(cls)
+                                warnings.append(f"Referenced equipment class '{cls.name}' not found in database")
+                        elif not getattr(cls, 'is_mission_local', False):  # Regular classes
+                            if not self.database.get_class(cls.name):
+                                self._missing_classes.add(cls)
+                                warnings.append(f"Class '{cls.name}' not found in database")
+                            if cls.parent and not self.database.get_class(cls.parent):
+                                warnings.append(f"Parent class '{cls.parent}' for '{cls.name}' not found in database")
+
                 except Exception as e:
                     logger.error(f"Error parsing {config}: {e}")
-            
-            logger.info(f"\nTotal classes found: {len(classes)}")
-            
-            # Add database validation (with reduced logging)
-            logger.info("\nValidating classes against database...")
-            logger.info("\nValidating classes against database...")
-            unique_classes = {cls.name for cls in classes}
-            logger.info(f"Found {len(unique_classes)} unique class names")
-            
-            # Filter out SQF files from detailed validation
-            logger.info(f"Found {len(unique_classes)} unique class names")
-            
-            # Filter out SQF files from detailed validation
-            non_sqf_assets = {
-                asset for asset in assets 
-                if not str(asset.path).lower().endswith('.sqf')
-            }
-            
-            # Run normal validation on non-SQF assets
+
+            # Process validation results
+            non_sqf_assets = {a for a in assets if not str(a.path).lower().endswith('.sqf')}
             warnings.extend(self._validate_assets(non_sqf_assets))
             
-            # After parsing config files, check expected classes
+            # Database validation
             self._validate_expected_classes(classes)
+            warnings.extend(self._validate_against_database(classes))
 
-            # After parsing config files, validate against database
-            logger.info("\nValidating classes against database...")
-            db_warnings = self._validate_against_database(classes)
-            warnings.extend(db_warnings)
-
-            # Update statistics with accurate counts
+            # Update statistics
             self._validation_stats.update({
                 "total_files": total_files,
                 "sqf_files": sqf_files,
@@ -232,32 +199,58 @@ class MissionValidator:
                 "total_classes": len(classes),
                 "missing_required": len(self._missing_required),
                 "class_stats": dict(self._class_stats),
-                "database_mismatches": len(db_warnings),
-                "missing_in_database": len([cls for cls in classes if not self.database.get_class(cls.name)]),
+                "database_mismatches": len(warnings),
+                "missing_in_database": len([cls for cls in classes if not self.database.get_class(cls.name)])
             })
-            
+
             # Cache results
             self.cache_mgr.cache_scan(cache_key, warnings)
             return warnings
-            
+
         except MissionValidationError:
             raise
         except Exception as e:
             logger.exception("Validation failed")
             raise MissionValidationError(
-                f"Validation error: {str(e)}", 
+                f"Validation error: {str(e)}",
                 {
                     "path": str(folder),
-                    "error_type": type(e).__name__, 
-                    "stack_trace": traceback.format_exc()  # Use traceback instead
+                    "error_type": type(e).__name__,
+                    "stack_trace": traceback.format_exc()
                 }
             ) from e
 
     def get_missing_items_report(self) -> str:
         """Generate a human readable report of missing items"""
+        if not self._missing_classes and not self._missing_assets:
+            return "No missing items found."
+
         report = []
         
-        # Add missing required classes section
+        if self._missing_classes:
+            report.append("Missing Classes:")
+            report.append("-" * 40)
+            
+            # Group by broad categories rather than source
+            equipment = []
+            other_classes = []
+            
+            for cls in sorted(self._missing_classes, key=lambda x: x.name):
+                if getattr(cls, 'is_reference', False):
+                    equipment.append(cls.name)
+                else:
+                    other_classes.append(cls.name)
+            
+            if equipment:
+                report.append("\nMissing Equipment References:")
+                for item in sorted(equipment):
+                    report.append(f"  - {item}")
+                    
+            if other_classes:
+                report.append("\nMissing Classes:")
+                for item in sorted(other_classes):
+                    report.append(f"  - {item}")
+
         if self._missing_required:
             report.append("\nMissing Required Classes:")
             report.append("-" * 40)
@@ -271,20 +264,6 @@ class MissionValidator:
             
             for category, classes in sorted(by_category.items()):
                 report.append(f"\nCategory: {category}")
-                for cls in sorted(classes):
-                    report.append(f"  - {cls}")
-
-        if self._missing_classes:
-            report.append("\nMissing Classes:")
-            report.append("-" * 40)
-            # Group by parent class
-            by_parent = defaultdict(list)
-            for cls in sorted(self._missing_classes):
-                parent = cls.parent if hasattr(cls, 'parent') else 'Unknown'
-                by_parent[parent].append(cls.name if hasattr(cls, 'name') else str(cls))
-                
-            for parent, classes in sorted(by_parent.items()):
-                report.append(f"\nExtending '{parent}':")
                 for cls in sorted(classes):
                     report.append(f"  - {cls}")
 
@@ -488,37 +467,31 @@ class MissionValidator:
                 self._class_stats[f"category_{cls.inidbi_meta.category}"] += 1
 
     def _validate_against_database(self, classes: Set[ClassDef]) -> List[str]:
-        """Check if classes exist in database, ignoring certain patterns"""
+        """Check if classes exist in database with case-insensitive comparison"""
         warnings = []
         found_in_db = set()
         missing_in_db = set()
         
-        logger.info(f"Starting database validation of {len(classes)} classes...")
-        
         for cls in classes:
             # Skip ignored patterns
             if self._should_ignore_class(cls.name):
-                logger.debug(f"Ignoring class: {cls.name}")
                 continue
 
-            exists = bool(self.database.get_class(cls.name))
-            if exists:
-                found_in_db.add(cls.name)
-            else:
+            # Case-insensitive database check
+            if not self.database.get_class(cls.name):  # Database now handles case-insensitivity
                 missing_in_db.add(cls.name)
-                warnings.append(f"Class '{cls.name}' from {cls.source} not found in database")
-                
-        # Add more detailed logging
+                self._missing_classes.add(cls)
+                warnings.append(f"Class '{cls.name}' not found in database")
+            else:
+                found_in_db.add(cls.name)
+
+        # Log validation results
         logger.info(f"Database validation complete:")
         logger.info(f"- Found in database: {len(found_in_db)}")
         logger.info(f"- Missing from database: {len(missing_in_db)}")
-        if missing_in_db:
-            logger.info("Missing classes:")
-            for cls in sorted(missing_in_db):
-                logger.info(f"  - {cls}")
-                
+        
         return warnings
 
     def _should_ignore_class(self, class_name: str) -> bool:
-        """Check if class name matches any ignore patterns"""
-        return any(pattern.match(class_name) for pattern in self._ignored_regexes)
+        """Case-insensitive pattern matching"""
+        return any(pattern.match(class_name.lower()) for pattern in self._ignored_regexes)

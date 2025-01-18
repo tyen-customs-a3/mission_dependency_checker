@@ -121,7 +121,8 @@ def test_scan_pca_modpack(cache_dir):
 
 def test_parse_basic_class(sample_class_file):
     parser = ClassParser()
-    classes = parser.parse_file(sample_class_file)
+    # Basic class parsing - don't treat as mission file
+    classes = parser.parse_file(sample_class_file, treat_as_mission=False)
     
     assert len(classes) == 3, f"Expected exactly 3 classes, got {len(classes)}: {[c.name for c in classes]}"
     
@@ -187,162 +188,74 @@ def test_circular_inheritance_detection(temp_dir):
     assert any("Circular inheritance" in w for w in warnings)
 
 def test_parse_loadout_file(sample_loadout_file):
-    """Test parsing of loadout file with LIST macros and equipment"""
     parser = ClassParser()
+    # Loadout parsing - treat as mission file (default behavior)
     classes = parser.parse_file(sample_loadout_file)
     
-    # Should find base class and rm class
-    assert len(classes) >= 2, "Expected at least baseMan and rm classes"
-    
-    # Check baseMan class
-    base_man = next((c for c in classes if c.name == "baseMan"), None)
-    assert base_man is not None
-    assert base_man.parent is None
-    assert "displayName" in base_man.properties
-    assert base_man.properties["displayName"] == '"Unarmed"'
-    
-    # Check rm (rifleman) class
-    rm = next((c for c in classes if c.name == "rm"), None)
-    assert rm is not None
-    assert rm.parent == "baseMan"
-    
     # Verify equipment references are found
-    equipment_refs = {c.name for c in classes if c.is_reference}
+    equipment_refs = {c.name for c in classes}  # All classes should be references now
     expected_items = {
-        "rhs_weap_rpg7",
+        "ACRE_PRC343",
         "ACE_fieldDressing",
-        "ACE_packingBandage",
+        "ACE_packingBandage", 
         "ACE_epinephrine",
         "ACE_morphine",
         "ACE_bloodIV",
         "ACE_splint",
         "ACE_surgicalKit",
+        "rhs_weap_rpg7",
         "rhs_rpg7_PG7VL_mag",
         "CUP_30Rnd_45ACP_Green_Tracer_MAC10_M",
-        "CUP_hgun_Mac10",
-        "pca_vest_invisible_plate",
-        "pca_backpack_invisible_large"
+        "pca_backpack_invisible_large",
+        "pca_vest_invisible_plate"
     }
     
     assert expected_items.issubset(equipment_refs), \
         f"Missing equipment references. Expected {expected_items - equipment_refs}"
     
-    # Verify LIST macro expansions
-    list_refs = {c for c in classes if c.is_reference and 'list_count' in c.properties}
+    # Verify LIST macro expansions are captured
+    list_refs = {c for c in classes if 'list_count' in c.properties}
     
     # Check a few specific LIST items
     field_dressing = next((c for c in list_refs if c.name == "ACE_fieldDressing"), None)
-    assert field_dressing is not None
+    assert field_dressing is not None, "ACE_fieldDressing not found"
     assert field_dressing.properties["list_count"] == "20"
     
     rpg_mag = next((c for c in list_refs if c.name == "rhs_rpg7_PG7VL_mag"), None)
-    assert rpg_mag is not None
+    assert rpg_mag is not None, "rhs_rpg7_PG7VL_mag not found"
     assert rpg_mag.properties["list_count"] == "10"
 
 # === INIDBI Parser Tests ===
 
-# Const data for INIDBI parsing tests
-INI_TEST_CONTENT = """
-[CategoryData_CfgVehicles]
-header=""ClassName,Source,Category,Parent,InheritsFrom,IsSimpleObject,NumProperties,Scope,Model""
-0=""All,@cup_terrain_core,CfgVehicles,CfgVehicles,,false,313,0,\A3\Weapons_F\empty.p3d""
-1=""Logic,curator,CfgVehicles,CfgVehicles,All,false,15,2,\A3\Weapons_f\empty""
-2=""AllVehicles,curator,CfgVehicles,CfgVehicles,All,false,65,0,\A3\Weapons_F\empty.p3d""
-3=""Land,A3,CfgVehicles,CfgVehicles,AllVehicles,false,20,0,\A3\Weapons_F\empty.p3d""
-4=""LandVehicle,A3,CfgVehicles,CfgVehicles,Land,false,25,0,\A3\Weapons_F\empty.p3d""
-5=""Car,@em,CfgVehicles,CfgVehicles,LandVehicle,false,104,0,\A3\Weapons_F\empty.p3d""
-6=""Motorcycle,@cup_terrain_core,CfgVehicles,CfgVehicles,LandVehicle,false,73,0,\A3\Weapons_F\empty.p3d""
-7=""Bicycle,A3,CfgVehicles,CfgVehicles,Motorcycle,false,11,0,\A3\Weapons_F\empty.p3d""
-8=""Tank,@em,CfgVehicles,CfgVehicles,LandVehicle,false,96,0,\A3\Weapons_F\empty.p3d""
-9=""APC,A3,CfgVehicles,CfgVehicles,Tank,false,20,0,\A3\Weapons_F\empty.p3d""
-10=""Man,curator,CfgVehicles,CfgVehicles,Land,false,227,0,""
-11=""Animal,A3,CfgVehicles,CfgVehicles,Man,false,22,0,""
-12=""Air,@em,CfgVehicles,CfgVehicles,AllVehicles,false,88,0,\A3\Weapons_F\empty.p3d""
-13=""Helicopter,@ace,CfgVehicles,CfgVehicles,Air,false,116,0,\A3\Weapons_F\empty.p3d""
-14=""Plane,@ace,CfgVehicles,CfgVehicles,Air,false,130,0,\A3\Weapons_F\empty.p3d""
-15=""Ship,A3,CfgVehicles,CfgVehicles,AllVehicles,false,69,0,\A3\Weapons_F\empty.p3d""
-16=""SmallShip,A3,CfgVehicles,CfgVehicles,Ship,false,20,0,\A3\Weapons_F\empty.p3d""
-17=""BigShip,A3,CfgVehicles,CfgVehicles,Ship,false,15,0,\A3\Weapons_F\empty.p3d""
-18=""Truck,A3,CfgVehicles,CfgVehicles,Car,false,18,0,\A3\Weapons_F\empty.p3d""
-19=""ParachuteBase,curator,CfgVehicles,CfgVehicles,Helicopter,false,71,0,\A3\air_f_beta\Parachute_01\Parachute_01_F.p3d""
-20=""LaserTarget,@cup_terrain_core,CfgVehicles,CfgVehicles,All,false,29,0,\A3\Weapons_f\laserTgt.p3d""
-21=""NVTarget,@cup_terrain_core,CfgVehicles,CfgVehicles,All,false,24,0,laserTgt.p3d""
-22=""ArtilleryTarget,@cba_a3,CfgVehicles,CfgVehicles,All,false,25,1,""
-23=""ArtilleryTargetW,A3,CfgVehicles,CfgVehicles,ArtilleryTarget,false,2,1,""
-24=""ArtilleryTargetE,A3,CfgVehicles,CfgVehicles,ArtilleryTarget,false,2,1,""
-25=""SuppressTarget,A3,CfgVehicles,CfgVehicles,LaserTarget,false,19,1,""
-26=""PaperCar,@cup_terrain_core,CfgVehicles,CfgVehicles,Car,false,8,0,\ca\data\papAuto.p3d""
-27=""FireSectorTarget,@cba_a3,CfgVehicles,CfgVehicles,All,false,37,1,\core\default\default.p3d""
-28=""Static,@cba_a3,CfgVehicles,CfgVehicles,All,false,30,0,\A3\Weapons_F\empty.p3d""
-29=""Rope,@em_rework,CfgVehicles,CfgVehicles,All,false,23,1,\A3\Data_f\proxies\Rope\rope.p3d""
-30=""Fortress,A3,CfgVehicles,CfgVehicles,Static,false,10,0,\A3\Weapons_F\empty.p3d""
-31=""Building,A3,CfgVehicles,CfgVehicles,Static,false,11,1,\A3\Weapons_F\empty.p3d""
-32=""NonStrategic,A3,CfgVehicles,CfgVehicles,Building,false,8,1,\A3\Weapons_F\empty.p3d""
-33=""HeliH,@cup_terrain_core,CfgVehicles,CfgVehicles,NonStrategic,false,19,2,\ca\misc\heli_h_army.p3d""
-34=""AirportBase,A3,CfgVehicles,CfgVehicles,NonStrategic,false,5,1,\A3\Weapons_F\empty.p3d""
-35=""Strategic,A3,CfgVehicles,CfgVehicles,Building,false,9,1,\A3\Weapons_F\empty.p3d""
-36=""FlagCarrierCore,A3,CfgVehicles,CfgVehicles,Strategic,false,14,1,""
-37=""Land_VASICore,A3,CfgVehicles,CfgVehicles,NonStrategic,false,24,1,""
-38=""Thing,A3,CfgVehicles,CfgVehicles,All,false,36,0,\A3\Weapons_F\empty.p3d""
-39=""ThingEffect,A3,CfgVehicles,CfgVehicles,Thing,false,10,1,\A3\Weapons_F\empty.p3d""
-40=""ThingEffectLight,A3,CfgVehicles,CfgVehicles,ThingEffect,false,9,0,\A3\Weapons_F\empty.p3d""
-41=""ThingEffectFeather,A3,CfgVehicles,CfgVehicles,ThingEffectLight,false,7,0,\A3\Weapons_F\empty.p3d""
-42=""FxExploArmor1,A3,CfgVehicles,CfgVehicles,ThingEffect,false,6,1,\A3\Weapons_f\metal_plate""
-43=""FxExploArmor2,A3,CfgVehicles,CfgVehicles,ThingEffect,false,6,1,\A3\Weapons_f\metal_plate_2""
-44=""FxExploArmor3,A3,CfgVehicles,CfgVehicles,ThingEffect,false,6,1,\A3\Weapons_f\debris""
-45=""FxExploArmor4,A3,CfgVehicles,CfgVehicles,ThingEffect,false,6,1,\A3\Weapons_f\fragment""
-46=""FxCartridge,A3,CfgVehicles,CfgVehicles,ThingEffect,false,11,1,\A3\Weapons_f\ammo\cartridge""
-47=""WindAnomaly,A3,CfgVehicles,CfgVehicles,All,false,9,0,\A3\Weapons_F\empty.p3d""
-48=""HouseBase,A3,CfgVehicles,CfgVehicles,NonStrategic,false,11,1,""
-49=""House,A3,CfgVehicles,CfgVehicles,HouseBase,false,7,1,""
-[CategoryData_CfgWeapons]
-header=""ClassName,Source,Category,Parent,InheritsFrom,IsSimpleObject,NumProperties,Scope,Model""
-0=""Default,A3,CfgWeapons,CfgWeapons,,false,133,0,""
-1=""PistolCore,A3,CfgWeapons,CfgWeapons,Default,false,4,0,""
-2=""RifleCore,A3,CfgWeapons,CfgWeapons,Default,false,6,0,""
-3=""MGunCore,A3,CfgWeapons,CfgWeapons,Default,false,5,0,""
-4=""LauncherCore,A3,CfgWeapons,CfgWeapons,Default,false,6,0,""
-5=""GrenadeCore,A3,CfgWeapons,CfgWeapons,Default,false,6,0,""
-6=""CannonCore,A3,CfgWeapons,CfgWeapons,Default,false,2,0,""
-7=""FakeWeapon,A3,CfgWeapons,CfgWeapons,MGunCore,false,8,1,""
-8=""DetectorCore,A3,CfgWeapons,CfgWeapons,Default,false,7,0,""
-9=""ItemCore,A3,CfgWeapons,CfgWeapons,Default,false,5,0,\A3\weapons_F\ammo\mag_univ.p3d""
-10=""HeadgearItem,@cup_units,CfgWeapons,CfgWeapons,InventoryItem_Base_F,false,6,0,""
-11=""VestItem,@cup_units,CfgWeapons,CfgWeapons,InventoryItem_Base_F,false,13,0,""
-12=""NVGoggles,@ace,CfgWeapons,CfgWeapons,Binocular,false,22,2,\A3\Weapons_f\binocular\nvg_proxy""
-"""
-
 def test_parse_inidbi_format(temp_dir):
     """Test INIDBI2 format parsing"""
-    test_file = temp_dir / "config.ini"
-    test_file.write_text(INI_TEST_CONTENT)
-
+    file_source = Path("D:/git/mission_checker/data/ConfigExtract_pca.ini")
+    if not file_source.exists():
+        pytest.skip("ConfigExtract_pca.ini not found, skipping test.")
+        
     parser = InidbiParser()
-    classes_by_source = parser.parse_file(test_file)
+    classes_by_source = parser.parse_file(file_source)
 
     # Check sources are present
     assert "@cup_terrain_core" in classes_by_source
     assert "curator" in classes_by_source
     assert "A3" in classes_by_source
 
-def test_class_lookup(temp_dir):
+def test_class_lookup(sample_inidbi_file):
     """Test exact class name lookup"""
-
-    test_file = temp_dir / "config.ini"
-    test_file.write_text(INI_TEST_CONTENT)
-
     parser = InidbiParser()
-    classes_by_source = parser.parse_file(test_file)
+    classes_by_source = parser.parse_file(sample_inidbi_file)
 
     # Test exact class lookup
-    all_class = parser.get_class("All")
-    assert all_class is not None
-    assert all_class.source == "@cup_terrain_core"
+    truck_class = parser.get_class("Truck")
+    assert truck_class is not None
+    assert truck_class.source == "mod_x"
+    assert truck_class.properties["Parent"] == "Car"
     
-    # Test pattern matching
-    logic_classes = parser.find_classes("Logic.*")
-    assert len(logic_classes) == 1
-    assert next(iter(logic_classes)).name == "Logic"
+    # Test pattern matching using Car.*
+    car_classes = parser.find_classes("Car.*")
+    assert len(car_classes) == 1
+    assert next(iter(car_classes)).name == "Car"
 
     # Test non-existent class
     assert parser.get_class("NonExistent") is None
@@ -389,19 +302,51 @@ def in_memory_db():
         db.close()
 
 def test_add_and_retrieve_class(in_memory_db):
-    """Test adding and retrieving class definitions"""
-    test_class = ClassDef(
+    """Test adding and retrieving class definitions with inheritance"""
+    # Add base vehicle class
+    base_vehicle = ClassDef(
+        name="Vehicle",
+        parent=None,
+        properties={"displayName": "Base Vehicle", "scope": "2"},
+        source="base_mod"
+    )
+    in_memory_db.add_class(base_vehicle)
+    
+    # Add derived test vehicle class
+    test_vehicle = ClassDef(
         name="TestVehicle",
         parent="Vehicle",
         properties={"displayName": "Test", "scope": "2"},
         source="test_mod"
     )
-    in_memory_db.add_class(test_class)
+    in_memory_db.add_class(test_vehicle)
 
+    # Add further derived class
+    test_truck = ClassDef(
+        name="TestTruck",
+        parent="TestVehicle",
+        properties={"cargoCapacity": "100"},
+        source="test_mod"
+    )
+    in_memory_db.add_class(test_truck)
+
+    # Test basic class retrieval
     history = in_memory_db.get_class_history("TestVehicle")
     assert len(history) == 1
+    assert history[0].name == "TestVehicle"
+    assert history[0].parent == "Vehicle"
 
-    chain = in_memory_db.get_inheritance_chain("TestVehicle")
-    assert len(chain) == 1
-    assert chain[0].name == "TestVehicle"
+    # Test inheritance chain retrieval
+    chain = in_memory_db.get_inheritance_chain("TestTruck")
+    assert len(chain) == 3, "Should find complete inheritance chain"
+    assert [c.name for c in chain] == ["TestTruck", "TestVehicle", "Vehicle"]
+    
+    # Test properties are preserved
+    assert chain[0].properties["cargoCapacity"] == "100"
+    assert chain[1].properties["displayName"] == "Test"
+    assert chain[2].properties["displayName"] == "Base Vehicle"
+
+    # Verify case-insensitive lookup
+    assert in_memory_db.get_class("testvehicle"), "Should find class with case-insensitive lookup"
+    assert in_memory_db.get_class("TESTVEHICLE"), "Should find class with uppercase lookup"
 

@@ -20,6 +20,7 @@ class ClassDatabase:
         sqlite3.register_converter('timestamp', lambda b: datetime.fromisoformat(b.decode()))
         self._initialize_db()
         self._required_classes = set()
+        self._conn.create_function("LOWER", 1, lambda x: x.lower() if x else None)
     
     def _initialize_db(self):
         """Initialize SQLite database schema"""
@@ -51,18 +52,7 @@ class ClassDatabase:
         """)
     
     def add_class(self, class_def) -> None:
-        """Add or update a class definition"""
-        # Convert string to ClassDef if needed
-        if isinstance(class_def, str):
-            class_def = ClassDef(
-                name=class_def,
-                parent=None,
-                source="unknown",
-                properties={}
-            )
-        elif not hasattr(class_def, 'name'):
-            raise TypeError(f"Expected ClassDef or string, got {type(class_def)}")
-            
+        """Add or update a class definition preserving original case"""
         cursor = self._conn.cursor()
         try:
             cursor.execute("""
@@ -82,33 +72,43 @@ class ClassDatabase:
         finally:
             cursor.close()
 
-        # Handle nested classes recursively
+        # Handle nested classes
         if class_def.nested_classes:
             for nested in class_def.nested_classes:
                 nested.parent = class_def.name
                 self.add_class(nested)
 
     def get_class_history(self, class_name: str) -> List[ClassDef]:
-        """Get version history for a class"""
+        """Get version history for a class preserving original case"""
         with self._get_connection() as conn:
             cursor = conn.execute("""
-                SELECT c.name, c.parent, c.source, GROUP_CONCAT(p.key || '=' || p.value) as props
+                SELECT c.name, c.parent, c.source, c.scope,
+                       GROUP_CONCAT(p.key || '=' || p.value) as props
                 FROM classes c
                 LEFT JOIN properties p ON c.id = p.class_id
-                WHERE c.name = ?
-                GROUP BY c.id
+                WHERE LOWER(c.name) = LOWER(?)
+                GROUP BY c.id, c.name, c.parent, c.source, c.scope
             """, (class_name,))
             
-            row = cursor.fetchone()
-            if row:
-                props = dict(p.split('=') for p in row[3].split(',')) if row[3] else {}
-                return [ClassDef(
-                    name=row[0],
-                    parent=row[1],
-                    source=row[2],
+            results = []
+            for row in cursor:
+                props = {}
+                if row['props']:
+                    for prop in row['props'].split(','):
+                        if '=' in prop:
+                            key, value = prop.split('=', 1)
+                            props[key] = value
+                            
+                class_def = ClassDef(
+                    name=row['name'],
+                    parent=row['parent'],  # Parent case is now preserved
+                    source=row['source'],
+                    scope=row['scope'],
                     properties=props
-                )]
-            return []
+                )
+                results.append(class_def)
+                
+            return results
 
     def get_inheritance_chain(self, class_name: str) -> List[ClassDef]:
         """Get complete inheritance chain for a class"""
@@ -158,13 +158,13 @@ class ClassDatabase:
         return chain
 
     def get_class(self, class_name: str) -> bool:
-        """Check if class exists in database"""
+        """Check if class exists in database using case-insensitive lookup"""
         if not class_name:
             return False
             
         with self._get_connection() as conn:
             cursor = conn.execute(
-                "SELECT EXISTS(SELECT 1 FROM classes WHERE name = ? LIMIT 1)", 
+                "SELECT EXISTS(SELECT 1 FROM classes WHERE LOWER(name) = LOWER(?) LIMIT 1)", 
                 (class_name,)
             )
             return bool(cursor.fetchone()[0])

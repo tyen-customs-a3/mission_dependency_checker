@@ -1,7 +1,14 @@
+import os
+import sys
 from pathlib import Path
-from core.database import ClassDatabase
-from core.validator import MissionValidator, MissionValidationError
-from core.parser import InidbiParser  # Add this import
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent
+sys.path.append(str(project_root))
+
+from src.core.database import ClassDatabase
+from src.core.validator import MissionValidator, MissionValidationError
+from src.core.parser import InidbiParser
 import logging
 from typing import Optional, Dict, Any
 import sys
@@ -48,7 +55,7 @@ def validate_ini_file(ini_path: Path) -> Optional[str]:
         return f"Error parsing INIDBI config: {str(e)}"
 
 def write_validation_report(validator: MissionValidator, mission_path: Path) -> Path:
-    """Write validation report to disk"""
+    """Write enhanced validation report to disk"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_dir = Path("reports")
     report_dir.mkdir(exist_ok=True)
@@ -99,6 +106,13 @@ def write_validation_report(validator: MissionValidator, mission_path: Path) -> 
             f.write("-" * 20 + "\n")
             for warning in sorted(summary['warnings']):
                 f.write(f"! {warning}\n")
+
+        # Write missing equipment section
+        missing_report = validator.get_missing_items_report()
+        if missing_report != "No missing items found.":
+            f.write("\n")
+            f.write(missing_report)
+            f.write("\n")
 
     # Also write machine-readable YAML version
     yaml_path = report_path.with_suffix('.yml')
@@ -172,36 +186,25 @@ def main():
         report_path = write_validation_report(validator, paths["Missions"])
         print(f"\nDetailed report written to: {report_path}")
         
-        # Show expanded item counts - removed references to non-existent methods
+        # Show class analysis
         print("\nClass Analysis:")
         print("-" * 60)
         print(f"Total classes found: {len(validator.get_all_classes())}")
         
-        if not warnings:
-            print("\n✓ No validation issues found")
-            return 0
-
-        print("\nValidation Issues:")
-        print("-" * 60)
-        
-        # Get missing items report
-        missing_report = validator.get_missing_items_report()
-        if missing_report != "No missing items found.":
-            print(missing_report)
-            
-        # Only show critical warnings that aren't about missing items
-        critical_warnings = [
-            w for w in warnings 
-            if not any(x in w.lower() for x in ["missing", "not found", "undefined"])
-        ]
-        
-        if critical_warnings:
-            print("\nOther Issues:")
+        # Show validation issues if any
+        if warnings:
+            print("\nValidation Issues:")
             print("-" * 60)
-            for warning in sorted(critical_warnings):
-                print(f"! {warning}")
-        
-        return len(warnings)
+            
+            # Show missing items report
+            missing_report = validator.get_missing_items_report()
+            if missing_report != "No missing items found.":
+                print(missing_report)
+
+            return len(warnings)
+            
+        print("\n✓ No validation issues found")
+        return 0
 
     except MissionValidationError as e:
         print(f"\nError: {str(e)}")

@@ -1,11 +1,12 @@
+import os
 import sys
 from pathlib import Path
 import pytest
 import tempfile
 import shutil
 
-# Add src directory to Python path
-src_path = Path(__file__).parent.parent
+# Add the src directory to Python path
+src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
 @pytest.fixture

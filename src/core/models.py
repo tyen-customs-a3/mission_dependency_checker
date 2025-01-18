@@ -49,11 +49,12 @@ class InidbiClass:
 class ClassDef:
     """Class definition model"""
     name: str
-    parent: Optional[str]
-    source: str
-    properties: Dict[str, str]
+    parent: Optional[str] = None
+    source: str = "unknown"
+    properties: Dict[str, str] = field(default_factory=dict)
     scope: str = "private"
     is_reference: bool = False  # Add flag for referenced classes
+    is_mission_local: bool = False  # Add flag for mission-local classes
     inidbi_meta: Optional[InidbiClass] = None
     nested_classes: Set['ClassDef'] = field(default_factory=set)
     

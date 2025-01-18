@@ -66,3 +66,25 @@ class BaseParser:
     def _get_content_hash(self, content: str) -> str:
         """Generate hash for version tracking"""
         return hashlib.md5(content.encode()).hexdigest()
+
+    def _extract_properties(self, body: str) -> Dict[str, str]:
+        """Extract properties from class body"""
+        properties = {}
+        lines = [l.strip() for l in body.split(';') if l.strip()]
+        
+        for line in lines:
+            if '=' in line and not line.strip().startswith('class'):
+                try:
+                    key, value = line.split('=', 1)
+                    key = key.strip()
+                    value = value.strip()
+                    if key and value:
+                        properties[key] = value
+                except Exception:
+                    continue
+                    
+        return properties
+
+    def _verify_balanced_braces(self, content: str) -> bool:
+        """Stub for brace validation - override in derived classes"""
+        return True  # Base implementation assumes valid
